@@ -1,7 +1,7 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
  *  Copyright (C) 2013 Christian Reisenberger.
- *  Copyright (C) 2013-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2019 Aina Niemetz.
  *  Copyright (C) 2013-2018 Mathias Preiner.
  *
  *  This file is part of Boolector.
@@ -111,6 +111,7 @@ btorunt_new (void)
     btor_hashptr_table_add (res->btor_opts, lng)->data.as_ptr = opt;
   }
   res->line = 1;
+  boolector_delete(tmpbtor);
   return res;
 }
 
@@ -385,7 +386,7 @@ parse (FILE *file)
   size_t i;
   int32_t ch;
   bool delete;
-  uint32_t j, len, buffer_len, val;
+  uint32_t len, buffer_len, val;
   char *buffer, *tok, *basename;
   BoolectorNode **tmp;
   BtorPtrHashTable *hmap;
@@ -534,10 +535,8 @@ NEXT:
     if (strcmp (tok, "new") && strcmp (tok, "get_btor"))
     {
       exp_str = parse_str_arg (tok);
-      len     = strlen (exp_str);
-      for (j = 0; j < len; j++) btor_str[j] = exp_str[j];
-      btor_str[j] = 0;
-      btor        = hmap_get (hmap, btor_str);
+      snprintf (btor_str, BTOR_STR_LEN, "%s", exp_str);
+      btor = hmap_get (hmap, btor_str);
       assert (btor);
     }
     if (!strcmp (tok, "chkclone"))
@@ -819,6 +818,63 @@ NEXT:
       PARSE_ARGS0 (tok);
       boolector_release_all (btor);
     }
+    else if (!strcmp (tok, "is_bv_const_zero"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_bool = boolector_is_bv_const_zero (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
+    else if (!strcmp (tok, "is_bv_const_one"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_bool = boolector_is_bv_const_one (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
+    else if (!strcmp (tok, "is_bv_const_ones"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_bool = boolector_is_bv_const_ones (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
+    else if (!strcmp (tok, "is_bv_const_min_signed"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_bool =
+            boolector_is_bv_const_min_signed (btor, hmap_get (hmap, arg1_str));
+        exp_ret = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
+    else if (!strcmp (tok, "is_bv_const_max_signed"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_bool =
+            boolector_is_bv_const_max_signed (btor, hmap_get (hmap, arg1_str));
+        exp_ret = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
     /* expressions */
     else if (!strcmp (tok, "const"))
     {
@@ -862,6 +918,18 @@ NEXT:
       ret_ptr = boolector_one (btor, get_sort (hmap, arg1_str));
       exp_ret = RET_VOIDPTR;
     }
+    else if (!strcmp (tok, "min_signed"))
+    {
+      PARSE_ARGS1 (tok, str);
+      ret_ptr = boolector_min_signed (btor, get_sort (hmap, arg1_str));
+      exp_ret = RET_VOIDPTR;
+    }
+    else if (!strcmp (tok, "max_signed"))
+    {
+      PARSE_ARGS1 (tok, str);
+      ret_ptr = boolector_max_signed (btor, get_sort (hmap, arg1_str));
+      exp_ret = RET_VOIDPTR;
+    }
     else if (!strcmp (tok, "unsigned_int"))
     {
       PARSE_ARGS2 (tok, int, str);
@@ -888,6 +956,13 @@ NEXT:
       arg2_str = !strcmp (arg2_str, "(null)") ? 0 : arg2_str;
       ret_ptr  = boolector_array (btor, get_sort (hmap, arg1_str), arg2_str);
       exp_ret  = RET_VOIDPTR;
+    }
+    else if (!strcmp (tok, "const_array"))
+    {
+      PARSE_ARGS2 (tok, str, str);
+      ret_ptr = boolector_const_array (
+          btor, get_sort (hmap, arg1_str), hmap_get (hmap, arg2_str));
+      exp_ret = RET_VOIDPTR;
     }
     else if (!strcmp (tok, "uf"))
     {
@@ -1331,12 +1406,12 @@ NEXT:
       else
         exp_ret = RET_SKIP;
     }
-    else if (!strcmp (tok, "get_id"))
+    else if (!strcmp (tok, "get_node_id"))
     {
       PARSE_ARGS1 (tok, str);
       if (!g_btorunt->skip)
       {
-        ret_int = boolector_get_id (btor, hmap_get (hmap, arg1_str));
+        ret_int = boolector_get_node_id (btor, hmap_get (hmap, arg1_str));
         exp_ret = RET_INT;
       }
       else
@@ -1391,7 +1466,7 @@ NEXT:
     else if (!strcmp (tok, "free_bits"))
     {
       PARSE_ARGS1 (tok, str);
-      boolector_free_bv_assignment (btor, hmap_get (hmap, arg1_str));
+      boolector_free_bits (btor, hmap_get (hmap, arg1_str));
     }
     else if (!strcmp (tok, "get_fun_arity"))
     {
@@ -1589,6 +1664,13 @@ NEXT:
           btor, get_sort (hmap, arg1_str), get_sort (hmap, arg2_str));
       exp_ret = RET_VOIDPTR;
     }
+    else if (!strcmp (tok, "copy_sort"))
+    {
+      PARSE_ARGS1 (tok, str);
+      ret_ptr = (void *) (size_t) boolector_copy_sort (
+          btor, get_sort (hmap, arg1_str));
+      exp_ret = RET_VOIDPTR;
+    }
     else if (!strcmp (tok, "fun_sort"))
     {
       while ((tok = strtok (0, " ")))
@@ -1637,6 +1719,18 @@ NEXT:
       {
         ret_bool = boolector_is_bitvec_sort (btor, get_sort (hmap, arg1_str));
         exp_ret  = RET_BOOL;
+      }
+      else
+        exp_ret = RET_SKIP;
+    }
+    else if (!strcmp (tok, "bitvec_sort_get_width"))
+    {
+      PARSE_ARGS1 (tok, str);
+      if (!g_btorunt->skip)
+      {
+        ret_int =
+            boolector_bitvec_sort_get_width (btor, get_sort (hmap, arg1_str));
+        exp_ret = RET_INT;
       }
       else
         exp_ret = RET_SKIP;

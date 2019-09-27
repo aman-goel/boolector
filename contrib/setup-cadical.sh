@@ -1,16 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-SETUP_DIR=$1
-if [ -z "$SETUP_DIR" ]; then
-  SETUP_DIR="./deps"
-fi
+set -e -o pipefail
 
-mkdir -p ${SETUP_DIR}
+source "$(dirname "$0")/setup-utils.sh"
 
-CADICAL_DIR=${SETUP_DIR}/cadical
+CADICAL_DIR=${DEPS_DIR}/cadical
+
+rm -rf ${CADICAL_DIR}
 
 # Download and build CaDiCaL
 git clone --depth 1 https://github.com/arminbiere/cadical.git ${CADICAL_DIR}
 cd ${CADICAL_DIR}
-CXXFLAGS="-fPIC" ./configure
-make -j2
+
+if is_windows; then
+  component="CaDiCaL"
+  last_patch_date="20190730"
+  test_apply_patch "${component}" "${last_patch_date}"
+  EXTRA_FLAGS="-q"
+  #
+  # CaDiCaL performs configure checks with -Werror, which fails on Windows as
+  # fPIC is not valid, so we set CXXFLAGS per-platform
+  #
+  export CXXFLAGS=""
+else
+  export CXXFLAGS="-fPIC"
+fi
+
+./configure ${EXTRA_FLAGS}
+make -j${NPROC}
+install_lib build/libcadical.a
+install_include src/ccadical.h

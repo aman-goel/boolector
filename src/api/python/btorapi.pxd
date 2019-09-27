@@ -183,6 +183,12 @@ cdef extern from "boolector.h":
         Btor * btor, BoolectorSort  sort, const char *symbol) \
       except +raise_py_error
 
+    BoolectorNode *boolector_const_array (
+        Btor * btor,
+        BoolectorSort  sort,
+        BoolectorNode * value) \
+      except +raise_py_error
+
     BoolectorNode *boolector_not (
         Btor * btor, BoolectorNode * node) \
       except +raise_py_error
@@ -415,10 +421,22 @@ cdef extern from "boolector.h":
     BoolectorNode *boolector_dec (Btor * btor, BoolectorNode *node) \
       except +raise_py_error
 
+    BoolectorNode *boolector_forall (Btor *btor,
+                                     BoolectorNode *params[],
+                                     uint32_t paramc,
+                                     BoolectorNode *body) \
+      except +raise_py_error
+
+    BoolectorNode *boolector_exists (Btor *btor,
+                                     BoolectorNode *param[],
+                                     uint32_t paramc,
+                                     BoolectorNode *body) \
+      except +raise_py_error
+
     #Btor *boolector_get_btor (BoolectorNode * node) \
     #  except +raise_py_error
 
-    #uint32_t boolector_get_id (Btor * btor, BoolectorNode * node) \
+    #uint32_t boolector_get_node_id (Btor * btor, BoolectorNode * node) \
     #  except +raise_py_error
 
     #BoolectorNode *boolector_match_node_by_id (Btor * btor, int32_t id) \
@@ -578,4 +596,7 @@ cdef extern from "boolector.h":
       except +raise_py_error
 
     const char * boolector_version (Btor * btor) \
+      except +raise_py_error
+
+    const char * boolector_git_id (Btor * btor) \
       except +raise_py_error

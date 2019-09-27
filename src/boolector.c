@@ -3,7 +3,7 @@
  *  Copyright (C) 2007-2009 Robert Daniel Brummayer.
  *  Copyright (C) 2007-2016 Armin Biere.
  *  Copyright (C) 2012-2018 Mathias Preiner.
- *  Copyright (C) 2013-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2019 Aina Niemetz.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -302,13 +302,34 @@ boolector_print_value_smt2 (Btor *btor,
   BTOR_ABORT_ARG_NULL (btor);
   BTOR_TRAPI_UNFUN_EXT (exp, "%s", symbol_str);
   BTOR_ABORT_ARG_NULL (file);
+  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT
+              || !btor->valid_assignments,
+              "cannot retrieve model if input formula is not SAT");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
               "model generation has not been enabled");
+  BTOR_ABORT (btor->quantifiers->count,
+              "models are currently not supported with quantifiers");
   BTOR_ABORT_BTOR_MISMATCH (btor, exp);
   btor_print_value_smt2 (btor, exp, symbol_str, file);
 #ifndef NDEBUG
   BTOR_CHKCLONE_NORES (
       print_value_smt2, BTOR_CLONED_EXP (exp), symbol_str, file);
+#endif
+}
+
+void
+boolector_add_output (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_ARG_NULL (node);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_PUSH_STACK (btor->outputs, btor_node_copy (btor, exp));
+#ifndef NDEBUG
+  BTOR_CHKCLONE_NORES (add_output, BTOR_CLONED_EXP (exp));
 #endif
 }
 
@@ -476,7 +497,8 @@ boolector_push (Btor *btor, uint32_t level)
   BTOR_TRAPI ("%u", level);
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_INCREMENTAL),
               "incremental usage has not been enabled");
-  BTOR_ABORT (level < 1, "context level must be greater than 0");
+
+  if (level == 0) return;
 
   uint32_t i;
   for (i = 0; i < level; i++)
@@ -484,6 +506,7 @@ boolector_push (Btor *btor, uint32_t level)
     BTOR_PUSH_STACK (btor->assertions_trail,
                      BTOR_COUNT_STACK (btor->assertions));
   }
+  btor->num_push_pop++;
 }
 
 void
@@ -491,7 +514,6 @@ boolector_pop (Btor *btor, uint32_t level)
 {
   BTOR_ABORT_ARG_NULL (btor);
   BTOR_TRAPI ("%u", level);
-  BTOR_ABORT (level < 1, "context level must be greater than 0");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_INCREMENTAL),
               "incremental usage has not been enabled");
   BTOR_ABORT (level > BTOR_COUNT_STACK (btor->assertions_trail),
@@ -499,16 +521,21 @@ boolector_pop (Btor *btor, uint32_t level)
               level,
               BTOR_COUNT_STACK (btor->assertions_trail));
 
-  uint32_t i, pos = 0;
-  for (i = 0; i < level; i++) pos = BTOR_POP_STACK (btor->assertions_trail);
+  if (level == 0) return;
 
+  uint32_t i, pos;
   BtorNode *cur;
+
+  for (i = 0, pos = 0; i < level; i++)
+    pos = BTOR_POP_STACK (btor->assertions_trail);
+
   while (BTOR_COUNT_STACK (btor->assertions) > pos)
   {
     cur = BTOR_POP_STACK (btor->assertions);
     btor_hashint_table_remove (btor->assertions_cache, btor_node_get_id (cur));
     btor_node_release (btor, cur);
   }
+  btor->num_push_pop++;
 }
 
 /*------------------------------------------------------------------------*/
@@ -771,8 +798,8 @@ boolector_set_sat_solver (Btor *btor, const char *solver)
         true,
         "SAT solver Lingeling not compiled in, using %s",
         oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "Cadical"
-            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSat"));
+            ? "CaDiCaL"
+            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
     sat_engine = oldval;
   }
 #endif
@@ -781,10 +808,10 @@ boolector_set_sat_solver (Btor *btor, const char *solver)
   {
     BTOR_WARN (
         true,
-        "SAT solver Cadical not compiled in, using %s",
+        "SAT solver CaDiCaL not compiled in, using %s",
         oldval == BTOR_SAT_ENGINE_LINGELING
             ? "Lingeling"
-            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSat"));
+            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
     sat_engine = oldval;
   }
 #endif
@@ -795,8 +822,8 @@ boolector_set_sat_solver (Btor *btor, const char *solver)
         sat_engine == BTOR_SAT_ENGINE_MINISAT,
         "SAT solver Minisat not compiled in, using %s",
         oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "Cadical"
-            : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling" : "PicoSat"));
+            ? "CaDiCaL"
+            : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling" : "PicoSAT"));
     sat_engine = oldval;
   }
 #endif
@@ -805,9 +832,9 @@ boolector_set_sat_solver (Btor *btor, const char *solver)
   {
     BTOR_WARN (
         sat_engine == BTOR_SAT_ENGINE_PICOSAT,
-        "SAT solver Picosat not compiled in, using %s",
+        "SAT solver PicoSAT not compiled in, using %s",
         oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "Cadical"
+            ? "CaDiCaL"
             : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling" : "MiniSat"));
     sat_engine = oldval;
   }
@@ -891,8 +918,8 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
           true,
           "SAT solver Lingeling not compiled in, using %s",
           oldval == BTOR_SAT_ENGINE_CADICAL
-              ? "Cadical"
-              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSat"));
+              ? "CaDiCaL"
+              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
       val = oldval;
     }
 #endif
@@ -901,10 +928,10 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
     {
       BTOR_WARN (
           true,
-          "SAT solver Cadical not compiled in, using %s",
+          "SAT solver CaDiCaL not compiled in, using %s",
           oldval == BTOR_SAT_ENGINE_LINGELING
               ? "Lingeling"
-              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSat"));
+              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
       val = oldval;
     }
 #endif
@@ -914,9 +941,9 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
       BTOR_WARN (val == BTOR_SAT_ENGINE_MINISAT,
                  "SAT solver Minisat not compiled in, using %s",
                  oldval == BTOR_SAT_ENGINE_CADICAL
-                     ? "Cadical"
+                     ? "CaDiCaL"
                      : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling"
-                                                            : "PicoSat"));
+                                                            : "PicoSAT"));
       val = oldval;
     }
 #endif
@@ -924,9 +951,9 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
     if (val == BTOR_SAT_ENGINE_PICOSAT)
     {
       BTOR_WARN (val == BTOR_SAT_ENGINE_PICOSAT,
-                 "SAT solver Picosat not compiled in, using %s",
+                 "SAT solver PicoSAT not compiled in, using %s",
                  oldval == BTOR_SAT_ENGINE_CADICAL
-                     ? "Cadical"
+                     ? "CaDiCaL"
                      : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling"
                                                             : "MiniSat"));
       val = oldval;
@@ -1214,7 +1241,7 @@ boolector_implies (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_IS_NOT_BV (e1);
   BTOR_ABORT (btor_node_bv_get_width (btor, e0) != 1
                   || btor_node_bv_get_width (btor, e1) != 1,
-              "bit-width of 'e0' and 'e1' have be 1");
+              "bit-width of 'e0' and 'e1' must be 1");
   res = btor_exp_implies (btor, e0, e1);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
@@ -1409,6 +1436,105 @@ boolector_consth (Btor *btor, BoolectorSort sort, const char *str)
   return BTOR_EXPORT_BOOLECTOR_NODE (res);
 }
 
+/*------------------------------------------------------------------------*/
+
+bool
+boolector_is_bv_const_zero (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+  bool res;
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  res = btor_node_is_bv_const_zero (btor, exp);
+  BTOR_TRAPI_RETURN_BOOL (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_BOOL (res, is_bv_const_zero, BTOR_CLONED_EXP (exp));
+#endif
+  return res;
+}
+
+bool
+boolector_is_bv_const_one (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+  bool res;
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  res = btor_node_is_bv_const_one (btor, exp);
+  BTOR_TRAPI_RETURN_BOOL (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_BOOL (res, is_bv_const_one, BTOR_CLONED_EXP (exp));
+#endif
+  return res;
+}
+
+bool
+boolector_is_bv_const_ones (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+  bool res;
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  res = btor_node_is_bv_const_ones (btor, exp);
+  BTOR_TRAPI_RETURN_BOOL (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_BOOL (res, is_bv_const_ones, BTOR_CLONED_EXP (exp));
+#endif
+  return res;
+}
+
+bool
+boolector_is_bv_const_max_signed (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+  bool res;
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  res = btor_node_is_bv_const_max_signed (btor, exp);
+  BTOR_TRAPI_RETURN_BOOL (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_BOOL (res, is_bv_const_max_signed, BTOR_CLONED_EXP (exp));
+#endif
+  return res;
+}
+
+bool
+boolector_is_bv_const_min_signed (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+  bool res;
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  res = btor_node_is_bv_const_min_signed (btor, exp);
+  BTOR_TRAPI_RETURN_BOOL (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_BOOL (res, is_bv_const_min_signed, BTOR_CLONED_EXP (exp));
+#endif
+  return res;
+}
+
+/*------------------------------------------------------------------------*/
+
 BoolectorNode *
 boolector_zero (Btor *btor, BoolectorSort sort)
 {
@@ -1473,6 +1599,46 @@ boolector_one (Btor *btor, BoolectorSort sort)
 }
 
 BoolectorNode *
+boolector_min_signed (Btor *btor, BoolectorSort sort)
+{
+  BtorNode *res;
+  BtorSortId s;
+
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI (BTOR_TRAPI_SORT_FMT, sort, btor);
+  s = BTOR_IMPORT_BOOLECTOR_SORT (sort);
+  BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
+  BTOR_ABORT (!btor_sort_is_bv (btor, s), "'sort' is not a bit vector sort");
+  res = btor_exp_bv_min_signed (btor, s);
+  btor_node_inc_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_NODE (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_PTR (res, min_signed, sort);
+#endif
+  return BTOR_EXPORT_BOOLECTOR_NODE (res);
+}
+
+BoolectorNode *
+boolector_max_signed (Btor *btor, BoolectorSort sort)
+{
+  BtorNode *res;
+  BtorSortId s;
+
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI (BTOR_TRAPI_SORT_FMT, sort, btor);
+  s = BTOR_IMPORT_BOOLECTOR_SORT (sort);
+  BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
+  BTOR_ABORT (!btor_sort_is_bv (btor, s), "'sort' is not a bit vector sort");
+  res = btor_exp_bv_max_signed (btor, s);
+  btor_node_inc_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_NODE (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_PTR (res, max_signed, sort);
+#endif
+  return BTOR_EXPORT_BOOLECTOR_NODE (res);
+}
+
+BoolectorNode *
 boolector_unsigned_int (Btor *btor, uint32_t u, BoolectorSort sort)
 {
   BtorNode *res;
@@ -1516,6 +1682,47 @@ boolector_int (Btor *btor, int32_t i, BoolectorSort sort)
 
 /*------------------------------------------------------------------------*/
 
+/* Remove unique symbol prefix and return start address of original symbol
+ * without prefix. */
+static const char *
+remove_unique_symbol_prefix (Btor *btor, const char *symbol)
+{
+  if (symbol)
+  {
+    size_t len    = strlen (symbol);
+    size_t offset = 5 + btor_util_num_digits (btor->num_push_pop);
+    if (len > offset && !strncmp (symbol, "BTOR_", 5) && symbol[offset] == '@')
+    {
+      return symbol + offset + 1;
+    }
+  }
+  return symbol;
+}
+
+/* Create symbol that is unique in the current scope. Prefix symbols with
+ * BTOR_<num_push_pop>@<symbol> to make them unique in the current context. */
+static char *
+mk_unique_symbol (Btor *btor, const char *symbol)
+{
+  char *symb;
+  size_t len;
+  if (btor->num_push_pop)
+  {
+    len = strlen (symbol) + 1;
+    len += strlen ("BTOR_@");
+    len += btor_util_num_digits (btor->num_push_pop);
+    BTOR_CNEWN (btor->mm, symb, len);
+    sprintf (symb, "BTOR_%u@%s", btor->num_push_pop, symbol);
+  }
+  else
+  {
+    symb = btor_mem_strdup (btor->mm, symbol);
+  }
+  assert (!symbol
+          || !strcmp (symbol, remove_unique_symbol_prefix (btor, symb)));
+  return symb;
+}
+
 BoolectorNode *
 boolector_var (Btor *btor, BoolectorSort sort, const char *symbol)
 {
@@ -1529,12 +1736,13 @@ boolector_var (Btor *btor, BoolectorSort sort, const char *symbol)
   BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
   BTOR_ABORT (!btor_sort_is_bv (btor, s),
               "'sort' is not a bit vector sort");
-  symb = (char *) symbol;
+  symb = mk_unique_symbol (btor, symbol);
   BTOR_TRAPI (BTOR_TRAPI_SORT_FMT " %s", sort, btor, symb);
   BTOR_ABORT (symb && btor_hashptr_table_get (btor->symbols, (char *) symb),
-              "symbol '%s' is already in use",
+              "symbol '%s' is already in use in the current context",
               symb);
   res = btor_exp_var (btor, s, symb);
+  btor_mem_freestr (btor->mm, symb);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
   (void) btor_hashptr_table_add (btor->inputs, btor_node_copy (btor, res));
@@ -1553,7 +1761,7 @@ boolector_array (Btor *btor, BoolectorSort sort, const char *symbol)
   char *symb;
   BtorSortId s;
 
-  symb = (char *) symbol;
+  symb = mk_unique_symbol (btor, symbol);
   s    = BTOR_IMPORT_BOOLECTOR_SORT (sort);
   BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
   BTOR_ABORT (!btor_sort_is_fun (btor, s)
@@ -1563,14 +1771,55 @@ boolector_array (Btor *btor, BoolectorSort sort, const char *symbol)
               "'sort' is not an array sort");
   BTOR_TRAPI (BTOR_TRAPI_SORT_FMT " %s", sort, btor, symb);
   BTOR_ABORT (symb && btor_hashptr_table_get (btor->symbols, symb),
-              "symbol '%s' is already in use",
+              "symbol '%s' is already in use in the current context",
               symb);
   res = btor_exp_array (btor, s, symb);
+  btor_mem_freestr (btor->mm, symb);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
   (void) btor_hashptr_table_add (btor->inputs, btor_node_copy (btor, res));
 #ifndef NDEBUG
   BTOR_CHKCLONE_RES_PTR (res, array, sort, symbol);
+#endif
+  return BTOR_EXPORT_BOOLECTOR_NODE (res);
+}
+
+BoolectorNode *
+boolector_const_array (Btor *btor, BoolectorSort sort, BoolectorNode *value)
+{
+  BTOR_ABORT_ARG_NULL (btor);
+
+  BtorNode *res, *val;
+  BtorSortId s;
+
+  val = BTOR_IMPORT_BOOLECTOR_NODE (value);
+
+  s    = BTOR_IMPORT_BOOLECTOR_SORT (sort);
+  BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
+  BTOR_ABORT (!btor_sort_is_fun (btor, s)
+                  || btor_sort_tuple_get_arity (
+                         btor, btor_sort_fun_get_domain (btor, s))
+                         != 1,
+              "'sort' is not an array sort");
+  BTOR_TRAPI (BTOR_TRAPI_SORT_FMT BTOR_TRAPI_NODE_FMT,
+              sort,
+              btor,
+              BTOR_TRAPI_NODE_ID (val));
+  BTOR_ABORT_ARG_NULL (val);
+  BTOR_ABORT_REFS_NOT_POS (val);
+  BTOR_ABORT_BTOR_MISMATCH (btor, val);
+  BTOR_ABORT_IS_NOT_BV (val);
+  BTOR_ABORT (
+      btor_node_get_sort_id (val) != btor_sort_array_get_element (btor, s),
+      "sort of 'value' does not match element sort of array");
+
+  res = btor_exp_const_array (btor, s, val);
+
+  btor_node_inc_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_NODE (res);
+
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_PTR (res, const_array, sort, value);
 #endif
   return BTOR_EXPORT_BOOLECTOR_NODE (res);
 }
@@ -1584,7 +1833,7 @@ boolector_uf (Btor *btor, BoolectorSort sort, const char *symbol)
   BtorSortId s;
   char *symb;
 
-  symb = (char *) symbol;
+  symb = mk_unique_symbol (btor, symbol);
   s    = BTOR_IMPORT_BOOLECTOR_SORT (sort);
   BTOR_TRAPI (BTOR_TRAPI_SORT_FMT "%s", sort, btor, symb);
   BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
@@ -1596,10 +1845,11 @@ boolector_uf (Btor *btor, BoolectorSort sort, const char *symbol)
               symbol ? symbol : "",
               symbol ? "'" : "");
   BTOR_ABORT (symb && btor_hashptr_table_get (btor->symbols, symb),
-              "symbol '%s' is already in use",
+              "symbol '%s' is already in use in the current context",
               symb);
 
   res = btor_exp_uf (btor, s, symb);
+  btor_mem_freestr (btor->mm, symb);
   assert (btor_node_is_regular (res));
   btor_node_inc_ext_ref_counter (btor, res);
   (void) btor_hashptr_table_add (btor->inputs, btor_node_copy (btor, res));
@@ -2958,16 +3208,17 @@ boolector_param (Btor *btor, BoolectorSort sort, const char *symbol)
   char *symb;
   BtorSortId s;
 
-  symb = (char *) symbol;
+  symb = mk_unique_symbol (btor, symbol);
   BTOR_TRAPI (BTOR_TRAPI_SORT_FMT " %s", sort, btor, symb);
   s = BTOR_IMPORT_BOOLECTOR_SORT (sort);
   BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
   BTOR_ABORT (!btor_sort_is_bv (btor, s),
               "'sort' is not a bit vector sort");
   BTOR_ABORT (symb && btor_hashptr_table_get (btor->symbols, symb),
-              "symbol '%s' is already in use",
+              "symbol '%s' is already in use in the current context",
               symb);
   res = btor_exp_param (btor, s, symb);
+  btor_mem_freestr (btor->mm, symb);
   btor_node_inc_ext_ref_counter (btor, res);
 
   BTOR_TRAPI_RETURN_NODE (res);
@@ -3002,6 +3253,8 @@ boolector_fun (Btor *btor,
     BTOR_ABORT (!params[i] || !btor_node_is_param (params[i]),
                 "'params[%u]' is not a parameter",
                 i);
+    BTOR_ABORT (btor_node_param_is_bound (params[i]),
+                "'params[%u]' already bound");
     BTOR_ABORT_REFS_NOT_POS (params[i]);
     BTOR_TRAPI_PRINT (BTOR_TRAPI_NODE_FMT, BTOR_TRAPI_NODE_ID (params[i]));
   }
@@ -3117,6 +3370,24 @@ boolector_dec (Btor *btor, BoolectorNode *node)
 
 /*------------------------------------------------------------------------*/
 
+static bool
+params_distinct (Btor *btor, BtorNode *params[], uint32_t paramc)
+{
+  bool res                = true;
+  BtorIntHashTable *cache = btor_hashint_table_new (btor->mm);
+  for (uint32_t i = 0; i < paramc; i++)
+  {
+    if (btor_hashint_table_contains (cache, btor_node_get_id (params[i])))
+    {
+      res = false;
+      break;
+    }
+    btor_hashint_table_add (cache, btor_node_get_id (params[i]));
+  }
+  btor_hashint_table_delete (cache);
+  return res;
+}
+
 BoolectorNode *
 boolector_forall (Btor *btor,
                   BoolectorNode *param_nodes[],
@@ -3138,12 +3409,16 @@ boolector_forall (Btor *btor,
     BTOR_ABORT (!params[i] || !btor_node_is_param (params[i]),
                 "'params[%u]' is not a parameter",
                 i);
+    BTOR_ABORT (btor_node_param_is_bound (params[i]),
+                "'params[%u]' already bound");
     BTOR_ABORT_REFS_NOT_POS (params[i]);
     BTOR_ABORT_BTOR_MISMATCH (btor, params[i]);
     BTOR_TRAPI_PRINT (BTOR_TRAPI_NODE_FMT, BTOR_TRAPI_NODE_ID (params[i]));
   }
   BTOR_TRAPI_PRINT (BTOR_TRAPI_NODE_FMT, BTOR_TRAPI_NODE_ID (body));
   BTOR_TRAPI_PRINT ("\n");
+  BTOR_ABORT (!params_distinct (btor, params, paramc),
+              "given parameters are not distinct");
 
   BTOR_ABORT_REFS_NOT_POS (body);
   BTOR_ABORT_BTOR_MISMATCH (btor, body);
@@ -3186,12 +3461,16 @@ boolector_exists (Btor *btor,
     BTOR_ABORT (!params[i] || !btor_node_is_param (params[i]),
                 "'params[%u]' is not a parameter",
                 i);
+    BTOR_ABORT (btor_node_param_is_bound (params[i]),
+                "'params[%u]' already bound");
     BTOR_ABORT_REFS_NOT_POS (params[i]);
     BTOR_ABORT_BTOR_MISMATCH (btor, params[i]);
     BTOR_TRAPI_PRINT (BTOR_TRAPI_NODE_FMT, BTOR_TRAPI_NODE_ID (params[i]));
   }
   BTOR_TRAPI_PRINT (BTOR_TRAPI_NODE_FMT, BTOR_TRAPI_NODE_ID (body));
   BTOR_TRAPI_PRINT ("\n");
+  BTOR_ABORT (!params_distinct (btor, params, paramc),
+              "given parameters are not distinct");
 
   BTOR_ABORT_REFS_NOT_POS (body);
   BTOR_ABORT_BTOR_MISMATCH (btor, body);
@@ -3239,7 +3518,7 @@ boolector_get_btor (BoolectorNode *node)
 }
 
 int32_t
-boolector_get_id (Btor *btor, BoolectorNode *node)
+boolector_get_node_id (Btor *btor, BoolectorNode *node)
 {
   int32_t res;
   BtorNode *exp;
@@ -3253,7 +3532,7 @@ boolector_get_id (Btor *btor, BoolectorNode *node)
   res = btor_node_get_id (btor_node_real_addr (exp));
   BTOR_TRAPI_RETURN_INT (res);
 #ifndef NDEBUG
-  BTOR_CHKCLONE_RES_INT (res, get_id, BTOR_CLONED_EXP (exp));
+  BTOR_CHKCLONE_RES_INT (res, get_node_id, BTOR_CLONED_EXP (exp));
 #endif
   return res;
 }
@@ -3342,11 +3621,14 @@ boolector_match_node_by_id (Btor *btor, int32_t id)
 BoolectorNode *
 boolector_match_node_by_symbol (Btor *btor, const char *symbol)
 {
+  char *symb;
   BtorNode *res;
   BTOR_ABORT_ARG_NULL (btor);
   BTOR_ABORT_ARG_NULL (symbol);
   BTOR_TRAPI ("%s", symbol);
-  res = btor_node_match_by_symbol (btor, symbol);
+  symb = mk_unique_symbol (btor, symbol);
+  res  = btor_node_match_by_symbol (btor, symb);
+  btor_mem_freestr (btor->mm, symb);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
@@ -3387,7 +3669,7 @@ boolector_get_symbol (Btor *btor, BoolectorNode *node)
   BTOR_TRAPI_UNFUN (exp);
   BTOR_ABORT_REFS_NOT_POS (exp);
   BTOR_ABORT_BTOR_MISMATCH (btor, exp);
-  res = (const char *) btor_node_get_symbol (btor, exp);
+  res = remove_unique_symbol_prefix (btor, btor_node_get_symbol (btor, exp));
   BTOR_TRAPI_RETURN_STR (res);
 #ifndef NDEBUG
   BTOR_CHKCLONE_RES_STR (res, get_symbol, BTOR_CLONED_EXP (exp));
@@ -3398,6 +3680,7 @@ boolector_get_symbol (Btor *btor, BoolectorNode *node)
 void
 boolector_set_symbol (Btor *btor, BoolectorNode *node, const char *symbol)
 {
+  char *symb;
   BtorNode *exp;
 
   exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
@@ -3407,7 +3690,9 @@ boolector_set_symbol (Btor *btor, BoolectorNode *node, const char *symbol)
   BTOR_TRAPI_UNFUN_EXT (exp, "%s", symbol);
   BTOR_ABORT_REFS_NOT_POS (exp);
   BTOR_ABORT_BTOR_MISMATCH (btor, exp);
-  btor_node_set_symbol (btor, exp, symbol);
+  symb = mk_unique_symbol (btor, symbol);
+  btor_node_set_symbol (btor, exp, symb);
+  btor_mem_freestr (btor->mm, symb);
 #ifndef NDEBUG
   BTOR_CHKCLONE_NORES (set_symbol, BTOR_CLONED_EXP (exp), symbol);
 #endif
@@ -3753,10 +4038,13 @@ boolector_bv_assignment (Btor *btor, BoolectorNode *node)
 
   exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT,
+  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT
+              || !btor->valid_assignments,
               "cannot retrieve model if input formula is not SAT");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
               "model generation has not been enabled");
+  BTOR_ABORT (btor->quantifiers->count,
+              "models are currently not supported with quantifiers");
   BTOR_ABORT_ARG_NULL (exp);
   BTOR_TRAPI_UNFUN (exp);
   BTOR_ABORT_REFS_NOT_POS (exp);
@@ -3924,7 +4212,8 @@ boolector_array_assignment (Btor *btor,
 
   e_array = BTOR_IMPORT_BOOLECTOR_NODE (n_array);
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT,
+  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT
+              || !btor->valid_assignments,
               "cannot retrieve model if input formula is not SAT");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
               "model generation has not been enabled");
@@ -3980,6 +4269,8 @@ boolector_free_array_assignment (Btor *btor,
   BTOR_ABORT (size && !values, "size > 0 but 'values' are zero");
   BTOR_ABORT (!size && indices, "non zero 'indices' but 'size == 0'");
   BTOR_ABORT (!size && values, "non zero 'values' but 'size == 0'");
+  if (!size) { return; }
+
   funass =
       btor_ass_get_fun ((const char **) indices, (const char **) values, size);
   (void) funass;
@@ -4006,7 +4297,8 @@ boolector_uf_assignment (Btor *btor,
 
   e_uf = BTOR_IMPORT_BOOLECTOR_NODE (n_uf);
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT,
+  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT
+              || !btor->valid_assignments,
               "cannot retrieve model if input formula is not SAT");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
               "model generation has not been enabled");
@@ -4086,7 +4378,8 @@ boolector_print_model (Btor *btor, char *format, FILE *file)
   BTOR_ABORT (strcmp (format, "btor") && strcmp (format, "smt2"),
               "invalid model output format: %s",
               format);
-  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT,
+  BTOR_ABORT (btor->last_sat_result != BTOR_RESULT_SAT
+              || !btor->valid_assignments,
               "cannot retrieve model if input formula is not SAT");
   BTOR_ABORT (!btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
               "model generation has not been enabled");
@@ -4224,6 +4517,23 @@ boolector_array_sort (Btor *btor, BoolectorSort index, BoolectorSort element)
   return BTOR_EXPORT_BOOLECTOR_SORT (res);
 }
 
+BoolectorSort
+boolector_copy_sort (Btor *btor, BoolectorSort sort)
+{
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI (BTOR_TRAPI_SORT_FMT, BTOR_IMPORT_BOOLECTOR_SORT (sort), btor);
+
+  BtorSortId s = BTOR_IMPORT_BOOLECTOR_SORT (sort);
+  BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
+  BtorSortId res = btor_sort_copy (btor, s);
+  inc_sort_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_SORT (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_SORT (res, copy_sort, sort);
+#endif
+  return BTOR_EXPORT_BOOLECTOR_SORT (res);
+}
+
 void
 boolector_release_sort (Btor *btor, BoolectorSort sort)
 {
@@ -4320,6 +4630,26 @@ boolector_is_fun_sort (Btor *btor, BoolectorSort sort)
   BTOR_TRAPI_RETURN_BOOL (res);
 #ifndef NDEBUG
   BTOR_CHKCLONE_RES_BOOL (res, is_fun_sort, sort);
+#endif
+  return res;
+}
+
+uint32_t
+boolector_bitvec_sort_get_width (Btor *btor, BoolectorSort sort)
+{
+  uint32_t res;
+  BtorSortId s;
+
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI (BTOR_TRAPI_SORT_FMT, sort, btor);
+  s = BTOR_IMPORT_BOOLECTOR_SORT (sort);
+
+  BTOR_ABORT (!btor_sort_is_valid (btor, s), "'sort' is not a valid sort");
+
+  res = btor_sort_bv_get_width (btor, s);
+  BTOR_TRAPI_RETURN_UINT (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_UINT (res, bitvec_sort_get_width, sort);
 #endif
   return res;
 }
@@ -4612,4 +4942,12 @@ boolector_version (Btor *btor)
   /* do not trace, not necessary */
   BTOR_ABORT_ARG_NULL (btor);
   return btor_version (btor);
+}
+
+const char *
+boolector_git_id (Btor *btor)
+{
+  /* do not trace, not necessary */
+  BTOR_ABORT_ARG_NULL (btor);
+  return btor_git_id (btor);
 }

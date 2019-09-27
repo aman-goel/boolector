@@ -1,6 +1,6 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
- *  Copyright (C) 2017-2018 Aina Niemetz.
+ *  Copyright (C) 2017-2019 Aina Niemetz.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -31,6 +31,8 @@ BtorNode *btor_exp_param (Btor *btor, BtorSortId sort, const char *symbol);
 
 /* Create an array variable of given sort. */
 BtorNode *btor_exp_array (Btor *btor, BtorSortId sort, const char *symbol);
+
+BtorNode *btor_exp_const_array (Btor *btor, BtorSortId sort, BtorNode *value);
 
 /* Create an uninterpreted function of given sort. */
 BtorNode *btor_exp_uf (Btor *btor, BtorSortId sort, const char *symbol);
@@ -99,6 +101,12 @@ BtorNode *btor_exp_bv_ones (Btor *btor, BtorSortId sort);
 
 /* Create a bit-vector constant representing 1. */
 BtorNode *btor_exp_bv_one (Btor *btor, BtorSortId sort);
+
+/* Create a bit-vector constant representing the minimum signed value. */
+BtorNode *btor_exp_bv_min_signed (Btor *btor, BtorSortId sort);
+
+/* Create a bit-vector constant representing the maximum signed value. */
+BtorNode *btor_exp_bv_max_signed (Btor *btor, BtorSortId sort);
 
 /**
  * Create a bit-vector constant representing the given signed integer.

@@ -1,15 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-SETUP_DIR=$1
-if [ -z "$SETUP_DIR" ]; then
-  SETUP_DIR="./deps"
-fi
+set -e -o pipefail
 
-mkdir -p ${SETUP_DIR}
+source "$(dirname "$0")/setup-utils.sh"
 
-MINISAT_DIR=${SETUP_DIR}/minisat
+MINISAT_DIR=${DEPS_DIR}/minisat
+
+rm -rf ${MINISAT_DIR}
 
 # Download and build MiniSat
 git clone --depth 1 https://github.com/niklasso/minisat.git ${MINISAT_DIR}
 cd ${MINISAT_DIR}
-make -j${NPROC}
+make config prefix=${INSTALL_DIR} -j${NPROC}
+make install

@@ -1,7 +1,7 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
  *  Copyright (C) 2013 Christian Reisenberger.
- *  Copyright (C) 2013-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2019 Aina Niemetz.
  *  Copyright (C) 2013-2018 Mathias Preiner.
  *  Copyright (C) 2013-2016 Armin Biere.
  *
@@ -243,6 +243,8 @@ typedef enum BtorMBTOperator
   ZERO,
   FALSE,
   ONES,
+  MIN_SIGNED,
+  MAX_SIGNED,
   TRUE,
   ONE,
   UINT,
@@ -1415,7 +1417,7 @@ btormbt_var (BtorMBT *mbt, BtorMBTExpType type)
   s   = boolector_bitvec_sort (mbt->btor, width);
   var = boolector_var (mbt->btor, s, 0);
   assert (boolector_is_var (mbt->btor, var));
-  id = boolector_get_id (mbt->btor, var);
+  id = boolector_get_node_id (mbt->btor, var);
   BTOR_NEWN (mbt->mm, symbol, 20);
   sprintf (symbol, "mbtvar%u", id);
   boolector_set_symbol (mbt->btor, var, symbol);
@@ -1487,11 +1489,37 @@ btormbt_const (BtorMBT *mbt)
       }
       BTOR_DELETEN (mbt->mm, bits, width + 1);
       break;
-    case ZERO: node = boolector_zero (mbt->btor, s); break;
-    case FALSE: node = boolector_false (mbt->btor); break;
-    case ONES: node = boolector_ones (mbt->btor, s); break;
-    case TRUE: node = boolector_true (mbt->btor); break;
-    case ONE: node = boolector_one (mbt->btor, s); break;
+    case ZERO:
+      node = boolector_zero (mbt->btor, s);
+      assert (boolector_is_bv_const_zero (mbt->btor, node));
+      break;
+    case FALSE:
+      node = boolector_false (mbt->btor);
+      assert (boolector_is_bv_const_zero (mbt->btor, node));
+      assert (boolector_is_bv_const_max_signed (mbt->btor, node));
+      break;
+    case ONES:
+      node = boolector_ones (mbt->btor, s);
+      assert (boolector_is_bv_const_ones (mbt->btor, node));
+      break;
+    case MIN_SIGNED:
+      node = boolector_min_signed (mbt->btor, s);
+      assert (boolector_is_bv_const_min_signed (mbt->btor, node));
+      break;
+    case MAX_SIGNED:
+      node = boolector_max_signed (mbt->btor, s);
+      assert (boolector_is_bv_const_max_signed (mbt->btor, node));
+      break;
+    case TRUE:
+      node = boolector_true (mbt->btor);
+      assert (boolector_is_bv_const_one (mbt->btor, node));
+      assert (boolector_is_bv_const_ones (mbt->btor, node));
+      assert (boolector_is_bv_const_min_signed (mbt->btor, node));
+      break;
+    case ONE:
+      node = boolector_one (mbt->btor, s);
+      assert (boolector_is_bv_const_one (mbt->btor, node));
+      break;
     case UINT: node = boolector_unsigned_int (mbt->btor, val, s); break;
     default: assert (op == INT); node = boolector_int (mbt->btor, val, s);
   }
@@ -1535,7 +1563,7 @@ btormbt_array (BtorMBT *mbt)
   array = boolector_array (mbt->btor, as, 0);
   assert (boolector_is_array (mbt->btor, array));
   assert (boolector_is_array_var (mbt->btor, array));
-  id = boolector_get_id (mbt->btor, array);
+  id = boolector_get_node_id (mbt->btor, array);
   BTOR_NEWN (mbt->mm, symbol, 20);
   sprintf (symbol, "mbtarr%u", id);
   boolector_set_symbol (mbt->btor, array, symbol);
@@ -2307,7 +2335,7 @@ btormbt_bv_fun (BtorMBT *mbt, int32_t nlevel)
       s   = boolector_bitvec_sort (mbt->btor, width);
       tmp = boolector_param (mbt->btor, s, 0);
       assert (boolector_is_param (mbt->btor, tmp));
-      id = boolector_get_id (mbt->btor, tmp);
+      id = boolector_get_node_id (mbt->btor, tmp);
       BTOR_NEWN (mbt->mm, symbol, 20);
       sprintf (symbol, "mbtparam%u", id);
       boolector_set_symbol (mbt->btor, tmp, symbol);
@@ -2464,7 +2492,7 @@ btormbt_bv_uf (BtorMBT *mbt)
     sort = btormbt_fun_sort (mbt);
     uf   = boolector_uf (mbt->btor, sort, 0);
     assert (boolector_is_uf (mbt->btor, uf));
-    id = boolector_get_id (mbt->btor, uf);
+    id = boolector_get_node_id (mbt->btor, uf);
     BTOR_NEWN (mbt->mm, symbol, 20);
     sprintf (symbol, "mbtuf%u", id);
     boolector_set_symbol (mbt->btor, uf, symbol);
@@ -3085,11 +3113,11 @@ btormbt_state_main (BtorMBT *mbt)
                                       BTOR_COUNT_STACK (exp_stack->exps) - 1))
                      ->exp;
           assert (boolector_get_btor (node) == mbt->btor);
-          id     = boolector_get_id (mbt->btor, node);
+          id     = boolector_get_node_id (mbt->btor, node);
           symbol = boolector_get_symbol (mbt->btor, node);
           cnode  = boolector_match_node (clone, node);
           assert (boolector_get_btor (cnode) == clone);
-          assert (id == boolector_get_id (clone, cnode));
+          assert (id == boolector_get_node_id (clone, cnode));
           assert (boolector_get_sort (mbt->btor, node)
                   == boolector_get_sort (clone, cnode));
           csymbol = boolector_get_symbol (clone, cnode);
@@ -3122,7 +3150,7 @@ btormbt_state_main (BtorMBT *mbt)
           {
             cnode = boolector_match_node_by_symbol (clone, symbol);
             assert (boolector_get_btor (cnode) == clone);
-            assert (id == boolector_get_id (clone, cnode));
+            assert (id == boolector_get_node_id (clone, cnode));
             assert (boolector_get_sort (mbt->btor, node)
                     == boolector_get_sort (clone, cnode));
             if (boolector_is_fun (mbt->btor, node))

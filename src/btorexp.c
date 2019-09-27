@@ -2,7 +2,7 @@
  *
  *  Copyright (C) 2007-2009 Robert Daniel Brummayer.
  *  Copyright (C) 2007-2015 Armin Biere.
- *  Copyright (C) 2012-2018 Aina Niemetz.
+ *  Copyright (C) 2012-2019 Aina Niemetz.
  *  Copyright (C) 2012-2017 Mathias Preiner.
  *
  *  This file is part of Boolector.
@@ -111,6 +111,33 @@ btor_exp_array (Btor *btor, BtorSortId sort, const char *symbol)
 
   exp           = btor_exp_uf (btor, sort, symbol);
   exp->is_array = 1;
+
+  return exp;
+}
+
+BtorNode *
+btor_exp_const_array (Btor *btor, BtorSortId sort, BtorNode *value)
+{
+  assert (btor);
+  assert (sort);
+  assert (btor_sort_is_fun (btor, sort));
+  assert (
+      btor_sort_tuple_get_arity (btor, btor_sort_fun_get_domain (btor, sort))
+      == 1);
+  assert (btor_sort_array_get_element (btor, sort)
+          == btor_node_get_sort_id (value));
+  assert (value);
+  assert (btor_sort_is_bv (btor, btor_node_get_sort_id (value)));
+
+  BtorNode *exp, *param;
+  BtorSortId idxsort;
+
+  idxsort       = btor_sort_array_get_index (btor, sort);
+  param         = btor_exp_param (btor, idxsort, 0);
+  exp           = btor_exp_lambda (btor, param, value);
+  exp->is_array = 1;
+
+  btor_node_release (btor, param);
 
   return exp;
 }
@@ -306,6 +333,42 @@ btor_exp_bv_one (Btor *btor, BtorSortId sort)
 
   width  = btor_sort_bv_get_width (btor, sort);
   bv     = btor_bv_one (btor->mm, width);
+  result = btor_exp_bv_const (btor, bv);
+  btor_bv_free (btor->mm, bv);
+  return result;
+}
+
+BtorNode *
+btor_exp_bv_min_signed (Btor *btor, BtorSortId sort)
+{
+  assert (btor);
+  assert (sort);
+  assert (btor_sort_is_bv (btor, sort));
+
+  uint32_t width;
+  BtorNode *result;
+  BtorBitVector *bv;
+
+  width  = btor_sort_bv_get_width (btor, sort);
+  bv     = btor_bv_min_signed (btor->mm, width);
+  result = btor_exp_bv_const (btor, bv);
+  btor_bv_free (btor->mm, bv);
+  return result;
+}
+
+BtorNode *
+btor_exp_bv_max_signed (Btor *btor, BtorSortId sort)
+{
+  assert (btor);
+  assert (sort);
+  assert (btor_sort_is_bv (btor, sort));
+
+  uint32_t width;
+  BtorNode *result;
+  BtorBitVector *bv;
+
+  width  = btor_sort_bv_get_width (btor, sort);
+  bv     = btor_bv_max_signed (btor->mm, width);
   result = btor_exp_bv_const (btor, bv);
   btor_bv_free (btor->mm, bv);
   return result;

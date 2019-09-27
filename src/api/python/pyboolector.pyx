@@ -33,6 +33,7 @@ class BoolectorException(Exception):
     def __str__(self):
         return "[pybtor] {}".format(self.msg)
 
+################################################################################
 # utility functions
 
 cdef btorapi.BoolectorNode * _c_node(x):
@@ -94,37 +95,7 @@ cdef uint32_t _get_argument_width(BoolectorFunNode fun, uint32_t pos):
             assert(isinstance(sort, _BoolectorBitVecSort))
             return (<_BoolectorBitVecSort> sort)._width
 
-def _check_precond_shift(BoolectorBVNode a, BoolectorBVNode b):
-    if not _is_power2(a.width):
-        raise BoolectorException(
-                  "Bit width of operand 'a' must be a power of 2")
-    if int(math.log(a.width, 2)) != b.width:
-        raise BoolectorException(
-                  "Bit width of operand 'b' must be equal to "\
-                  "log2(bit width of a)")
-
-def _check_precond_slice(BoolectorBVNode a, uint32_t upper, uint32_t lower):
-        if upper >= a.width:
-            raise BoolectorException(
-                      "Upper limit of slice must be lower than the bit width "\
-                      "of the bit vector")
-        if lower > upper:
-            raise BoolectorException("Lower limit must be within the bounds "\
-                                      "of [upper:0]")
-
-def _check_precond_cond(cond, a, b):
-    if isinstance(cond, int) and (cond > 1 or cond < 0):
-        raise BoolectorException(
-                  "'cond' needs to either boolean or an integer of 0 or 1")
-    if not (isinstance(a, BoolectorBVNode) or
-            isinstance(b, BoolectorBVNode)) and \
-       not (isinstance(a, BoolectorArrayNode) and
-            isinstance(b, BoolectorArrayNode)) and \
-       not (isinstance(a, BoolectorFunNode) and
-            isinstance(b, BoolectorFunNode)):
-        raise BoolectorException(
-                  "At least one of the operands must be a bit vector")
-
+################################################################################
 # sort wrapper classes
 
 cdef class BoolectorSort:
@@ -169,6 +140,7 @@ cdef class _BoolectorBoolSort(BoolectorSort):
     """
     pass
 
+################################################################################
 # option wrapper classes
 
 cdef class BoolectorOptions:
@@ -276,6 +248,8 @@ cdef class BoolectorOpt:
         return "{}, [{}, {}], default: {}".format(self.lng,
                                                   self.min, self.max,
                                                   self.dflt)
+
+################################################################################
 # wrapper classes for BoolectorNode
 
 cdef class BoolectorNode:
@@ -584,6 +558,41 @@ cdef class BoolectorFunNode(BoolectorNode):
 cdef class _BoolectorParamNode(BoolectorBVNode):
     pass
 
+cdef class BoolectorQuantNode(BoolectorBVNode):
+    """
+    The class representing a Boolector quantified node.
+    """
+    cdef list _params
+    cdef bool is_existential
+
+    def __init__ (self, Boolector boolector, bool is_exists):
+        super().__init__(boolector)
+        self.is_existential = is_exists
+
+    def is_exists(self):
+        return self.is_existential
+
+    def is_forall(self):
+        return not self.is_existential
+
+cdef class BoolectorExistsNode(BoolectorQuantNode):
+    """
+    The class representing a Boolector existentially quantified node.
+    """
+
+    def __init__ (self, Boolector boolector):
+        super().__init__(boolector, True)
+
+cdef class BoolectorForallNode(BoolectorQuantNode):
+    """
+    The class representing a Boolector universally quantified node.
+    """
+
+    def __init__ (self, Boolector boolector):
+        super().__init__(boolector, False)
+
+
+################################################################################
 # wrapper class for Boolector itself
 
 cdef class Boolector:
@@ -685,6 +694,11 @@ cdef class Boolector:
     def Version(self):
             cdef const char * c_str
             c_str = btorapi.boolector_version(self._c_btor)
+            return _to_str(c_str)
+
+    def GitId(self):
+            cdef const char * c_str
+            c_str = btorapi.boolector_git_id(self._c_btor)
             return _to_str(c_str)
 
     def Push(self, uint32_t levels = 1):
@@ -1338,6 +1352,31 @@ cdef class Boolector:
                                             _ChPtr(symbol)._c_str)
         return r
 
+    def ConstArray(self, BoolectorSort sort, BoolectorNode value):
+        """ ConstArray(sort, value)
+
+            Create a one-dimensional constant bit-vector array with sort
+            ``sort`` initialized with value ``value``.
+
+            :param btor: Boolector instance.
+            :param sort: Array sort which maps bit-vectors to bit-vectors.
+            :param value: Value to initialize array.
+            :return: Constant bit-vector array of sort ``sort``.
+
+            .. seealso::
+              :func:`~pyboolector.Boolector.Array`
+
+        """
+        if not isinstance(sort, _BoolectorArraySort):
+            raise BoolectorException(
+                    "Sort must be of sort '_BoolectorArraySort'")
+        r = BoolectorArrayNode(self)
+        r._sort = sort
+        r._c_node = btorapi.boolector_const_array(self._c_btor,
+                                                  sort._c_sort,
+                                                  value._c_node)
+        return r
+
     def UF(self, BoolectorSort sort, str symbol = None):
         """ UF(sort, symbol)
 
@@ -1489,7 +1528,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
 
         """
-        _check_precond_slice(n, upper, lower)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_slice(self._c_btor, n._c_node,
                                             upper, lower)
@@ -2153,7 +2191,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
         b = self.Const(b, math.ceil(math.log(a.width, 2)))
-        _check_precond_shift(a, b)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_sll(self._c_btor,
                                           _c_node(a), _c_node(b))
@@ -2181,7 +2218,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
         b = self.Const(b, math.ceil(math.log(a.width, 2)))
-        _check_precond_shift(a, b)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_srl(self._c_btor,
                                           _c_node(a), _c_node(b))
@@ -2204,7 +2240,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
         b = self.Const(b, math.ceil(math.log(a.width, 2)))
-        _check_precond_shift(a, b)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_sra(self._c_btor,
                                           _c_node(a), _c_node(b))
@@ -2227,7 +2262,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
         b = self.Const(b, math.ceil(math.log(a.width, 2)))
-        _check_precond_shift(a, b)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_rol(self._c_btor,
                                           _c_node(a), _c_node(b))
@@ -2250,7 +2284,6 @@ cdef class Boolector:
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
         b = self.Const(b, math.ceil(math.log(a.width, 2)))
-        _check_precond_shift(a, b)
         r = BoolectorBVNode(self)
         r._c_node = btorapi.boolector_ror(self._c_btor,
                                           _c_node(a), _c_node(b))
@@ -2611,7 +2644,6 @@ cdef class Boolector:
             :return:  Either ``a`` or ``b``.
             :rtype: :class:`~pyboolector.BoolectorNode`
         """
-        _check_precond_cond(cond, a, b)
         cond = self.Const(cond, width=1)
         if isinstance(a, BoolectorBVNode) or isinstance(b, BoolectorBVNode):
             r = BoolectorBVNode(self)
@@ -2716,6 +2748,72 @@ cdef class Boolector:
         r._c_node = \
             btorapi.boolector_apply(self._c_btor, c_args, argc, fun._c_node)
         free(c_args)
+        return r
+
+    # Quantified Terms
+
+    def Exists(self, list params, BoolectorBVNode body):
+        """ Exists(params, body)
+
+            Create an existentially quantified formula.
+
+            See :func:`~pyboolector.Boolector.Param`
+
+            :param params: A list of (existentially quantified) parameters.
+            :type params: list
+            :param body: Formula existentially quantified over ``params``.
+            :type body:  :class:`~pyboolector.BoolectorNode`
+            :return:  A formula ``body`` existentially quantified over ``params``.
+            :rtype: :class:`~pyboolector.BoolectorNode`
+        """
+        cdef uint32_t paramc = len(params)
+        cdef btorapi.BoolectorNode ** c_params = \
+            <btorapi.BoolectorNode **> \
+                malloc(paramc * sizeof(btorapi.BoolectorNode *))
+        # copy params into array
+        for i in range(paramc):
+            if not isinstance(params[i], _BoolectorParamNode):
+                raise BoolectorException(
+                          "Operand at position {} is not a parameter".format(i))
+            c_params[i] = _c_node(params[i])
+
+        r = BoolectorExistsNode(self)
+        r._params = params
+        r._c_node = btorapi.boolector_exists( \
+                self._c_btor, c_params, paramc, body._c_node)
+        free(c_params)
+        return r
+
+    def Forall(self, list params, BoolectorBVNode body):
+        """ Forall(params, body)
+
+            Create an universally quantified formula.
+
+            See :func:`~pyboolector.Boolector.Param`
+
+            :param params: A list of (universally quantified) parameters.
+            :type params: list
+            :param body: Formula universally quantified over ``params``.
+            :type body:  :class:`~pyboolector.BoolectorNode`
+            :return:  A formula ``body`` universally quantified over ``params``.
+            :rtype: :class:`~pyboolector.BoolectorNode`
+        """
+        cdef uint32_t paramc = len(params)
+        cdef btorapi.BoolectorNode ** c_params = \
+            <btorapi.BoolectorNode **> \
+                malloc(paramc * sizeof(btorapi.BoolectorNode *))
+        # copy params into array
+        for i in range(paramc):
+            if not isinstance(params[i], _BoolectorParamNode):
+                raise BoolectorException(
+                          "Operand at position {} is not a parameter".format(i))
+            c_params[i] = _c_node(params[i])
+
+        r = BoolectorExistsNode(self)
+        r._params = params
+        r._c_node = btorapi.boolector_forall( \
+                self._c_btor, c_params, paramc, body._c_node)
+        free(c_params)
         return r
 
     # Sorts

@@ -1,7 +1,7 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
  *  Copyright (C) 2013-2017 Mathias Preiner.
- *  Copyright (C) 2015-2018 Aina Niemetz.
+ *  Copyright (C) 2015-2019 Aina Niemetz.
  *  Copyright (C) 2018 Armin Biere.
  *
  *  This file is part of Boolector.
@@ -313,12 +313,10 @@ btor_bv_consth (BtorMemMgr *mm, const char *str, uint32_t bw)
 /*------------------------------------------------------------------------*/
 
 BtorBitVector *
-btor_bv_get_assignment (BtorMemMgr *mm, BtorNode *exp, bool init_x_values)
+btor_bv_get_assignment (BtorMemMgr *mm, BtorNode *exp)
 {
   assert (mm);
   assert (exp);
-  assert (init_x_values || btor_node_real_addr (exp)->av);
-  assert (init_x_values == 0 || init_x_values == 1);
 
   uint32_t i, j, width;
   int32_t bit;
@@ -342,7 +340,6 @@ btor_bv_get_assignment (BtorMemMgr *mm, BtorNode *exp, bool init_x_values)
   for (i = 0, j = width - 1; i < width; i++, j--)
   {
     bit = btor_aig_get_assignment (amgr, av->aigs[j]);
-    if (init_x_values && bit == 0) bit = -1;
     if (inv) bit *= -1;
     assert (bit == -1 || bit == 1);
     btor_bv_set_bit (res, i, bit == 1 ? 1 : 0);
@@ -721,6 +718,40 @@ btor_bv_is_one (const BtorBitVector *bv)
   return true;
 }
 
+bool
+btor_bv_is_min_signed (const BtorBitVector *bv)
+{
+  assert (bv);
+
+  uint32_t i;
+
+  if (bv->bits[0] != (1u << ((bv->width % BTOR_BV_TYPE_BW) - 1))) return false;
+  for (i = 1; i < bv->len; i++)
+    if (bv->bits[i] != 0) return false;
+  return true;
+}
+
+bool
+btor_bv_is_max_signed (const BtorBitVector *bv)
+{
+  assert (bv);
+
+  uint32_t i, msc;
+
+  msc = (BTOR_BV_TYPE_BW - (bv->width % BTOR_BV_TYPE_BW) + 1);
+  if (msc == BTOR_BV_TYPE_BW)
+  {
+    if (bv->bits[0] != 0) return false;
+  }
+  else if (bv->bits[0] != (~0u >> msc))
+  {
+    return false;
+  }
+  for (i = 1; i < bv->len; i++)
+    if (bv->bits[i] != ~0u) return false;
+  return true;
+}
+
 int64_t
 btor_bv_power_of_two (const BtorBitVector *bv)
 {
@@ -828,6 +859,32 @@ btor_bv_ones (BtorMemMgr *mm, uint32_t bw)
   res = btor_bv_not (mm, tmp);
   btor_bv_free (mm, tmp);
 
+  return res;
+}
+
+BtorBitVector *
+btor_bv_min_signed (BtorMemMgr *mm, uint32_t bw)
+{
+  assert (mm);
+  assert (bw);
+
+  BtorBitVector *res;
+
+  res = btor_bv_new (mm, bw);
+  btor_bv_set_bit (res, bw - 1, 1);
+  return res;
+}
+
+BtorBitVector *
+btor_bv_max_signed (BtorMemMgr *mm, uint32_t bw)
+{
+  assert (mm);
+  assert (bw);
+
+  BtorBitVector *res;
+
+  res = btor_bv_ones (mm, bw);
+  btor_bv_set_bit (res, bw - 1, 0);
   return res;
 }
 
@@ -1554,19 +1611,13 @@ btor_bv_sext (BtorMemMgr *mm, const BtorBitVector *bv, uint32_t len)
   assert (bv);
   assert (len > 0);
 
-  uint32_t i;
-  BtorBitVector *res;
+  BtorBitVector *tmp, *res;
 
-  res = btor_bv_new (mm, bv->width + len);
-  memcpy (
-      res->bits + res->len - bv->len, bv->bits, sizeof (*(bv->bits)) * bv->len);
-  if (btor_bv_get_bit (bv, bv->width - 1))
-  {
-    i = (bv->width % BTOR_BV_TYPE_BW);
-    res->bits[res->len - bv->len] |= (((uint64_t) -1) >> i) << i;
-    for (i = 0; i < res->len - bv->len; i++) res->bits[i] = UINT32_MAX;
-  }
-
+  tmp = btor_bv_get_bit (bv, bv->width - 1) ? btor_bv_ones (mm, len)
+                                            : btor_bv_zero (mm, len);
+  res = btor_bv_concat (mm, tmp, bv);
+  btor_bv_free (mm, tmp);
+  assert (rem_bits_zero_dbg (res));
   return res;
 }
 
@@ -1860,12 +1911,10 @@ BtorBitVectorTuple *
 btor_bv_new_tuple (BtorMemMgr *mm, uint32_t arity)
 {
   assert (mm);
-  assert (arity > 0);
-
   BtorBitVectorTuple *res;
 
   BTOR_CNEW (mm, res);
-  BTOR_CNEWN (mm, res->bv, arity);
+  if (arity) BTOR_CNEWN (mm, res->bv, arity);
   res->arity = arity;
   return res;
 }
@@ -1891,9 +1940,12 @@ btor_bv_free_tuple (BtorMemMgr *mm, BtorBitVectorTuple *t)
   assert (t);
 
   uint32_t i;
-  for (i = 0; i < t->arity; i++) btor_bv_free (mm, t->bv[i]);
 
-  btor_mem_free (mm, t->bv, sizeof (BtorBitVectorTuple *) * t->arity);
+  if (t->arity)
+  {
+    for (i = 0; i < t->arity; i++) btor_bv_free (mm, t->bv[i]);
+    btor_mem_free (mm, t->bv, sizeof (BtorBitVectorTuple *) * t->arity);
+  }
   btor_mem_free (mm, t, sizeof (BtorBitVectorTuple));
 }
 

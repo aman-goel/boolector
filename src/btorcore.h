@@ -122,6 +122,7 @@ struct Btor
   BtorIntHashTable *bv_model;
   BtorIntHashTable *fun_model;
   BtorNodePtrStack functions_with_model;
+  BtorNodePtrStack outputs; /* used to synthesize BTOR2 outputs */
 
   uint32_t rec_rw_calls; /* calls for recursive rewriting */
   uint32_t valid_assignments;
@@ -157,6 +158,8 @@ struct Btor
   BtorIntHashTable *assertions_cache;
   /* saves the number of assertions on each push */
   BtorUIntStack assertions_trail;
+  /* Number of push/pop calls (used for unique symbol prefixes) */
+  uint32_t num_push_pop;
 
 #ifndef NDEBUG
   Btor *clone; /* shadow clone (debugging only) */
@@ -243,6 +246,9 @@ void btor_delete (Btor *btor);
 
 /* Gets version. */
 const char *btor_version (const Btor *btor);
+
+/* Gets id. */
+const char *btor_git_id (const Btor *btor);
 
 /* Set termination callback. */
 void btor_set_term (Btor *btor, int32_t (*fun) (void *), void *state);
