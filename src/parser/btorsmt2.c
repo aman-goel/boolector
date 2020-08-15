@@ -1,8 +1,8 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
  *  Copyright (C) 2011-2017 Armin Biere.
- *  Copyright (C) 2013-2019 Aina Niemetz.
- *  Copyright (C) 2013-2018 Mathias Preiner.
+ *  Copyright (C) 2013-2020 Aina Niemetz.
+ *  Copyright (C) 2013-2020 Mathias Preiner.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -29,6 +29,7 @@ BTOR_DECLARE_STACK (BoolectorNodePtr, BoolectorNode *);
 /*------------------------------------------------------------------------*/
 
 void boolector_print_value_smt2 (Btor *, BoolectorNode *, char *, FILE *);
+void boolector_var_mark_bool (Btor *, BoolectorNode *);
 
 /*------------------------------------------------------------------------*/
 
@@ -163,6 +164,7 @@ typedef enum BtorSMT2Tag
   BTOR_VALUES_TAG_SMT2                    = 32 + BTOR_KEYWORD_TAG_CLASS_SMT2,
   BTOR_VERBOSITY_TAG_SMT2                 = 33 + BTOR_KEYWORD_TAG_CLASS_SMT2,
   BTOR_VERSION_TAG_SMT2                   = 34 + BTOR_KEYWORD_TAG_CLASS_SMT2,
+  BTOR_GLOBAL_DECLARATIONS_TAG_SMT2       = 35 + BTOR_KEYWORD_TAG_CLASS_SMT2,
 
   /* ---------------------------------------------------------------------- */
   /* Theories                                                               */
@@ -295,6 +297,7 @@ typedef struct BtorSMT2Item
   {
     BtorSMT2Node *node;
     BoolectorNode *exp;
+    BoolectorSort sort;
     char *str;
   };
 } BtorSMT2Item;
@@ -382,6 +385,7 @@ typedef struct BtorSMT2Parser
 
   /* SMT2 options */
   bool print_success;
+  bool global_declarations;
 } BtorSMT2Parser;
 
 static int32_t
@@ -730,16 +734,19 @@ close_current_scope (BtorSMT2Parser *parser)
 
   start = btor_util_time_stamp ();
 
-  /* delete symbols from current scope */
-  for (i = 0; i < parser->symbol.size; i++)
+  if (!parser->global_declarations)
   {
-    node = parser->symbol.table[i];
-    while (node)
+    /* delete symbols from current scope */
+    for (i = 0; i < parser->symbol.size; i++)
     {
-      next = node->next;
-      if (node->scope_level == parser->scope_level)
-        remove_symbol_smt2 (parser, node);
-      node = next;
+      node = parser->symbol.table[i];
+      while (node)
+      {
+        next = node->next;
+        if (node->scope_level == parser->scope_level)
+          remove_symbol_smt2 (parser, node);
+        node = next;
+      }
     }
   }
 
@@ -835,6 +842,7 @@ insert_keywords_smt2 (BtorSMT2Parser *parser)
   INSERT (":values", BTOR_VALUES_TAG_SMT2);
   INSERT (":verbosity", BTOR_VERBOSITY_TAG_SMT2);
   INSERT (":version", BTOR_VERSION_TAG_SMT2);
+  INSERT (":global-declarations", BTOR_GLOBAL_DECLARATIONS_TAG_SMT2);
 }
 
 static void
@@ -981,6 +989,7 @@ insert_logics_smt2 (BtorSMT2Parser *parser)
   INSERT ("UFBV", BTOR_LOGIC_UFBV_TAG_SMT2);
   INSERT ("ABV", BTOR_LOGIC_ABV_TAG_SMT2);
   INSERT ("ALL", BTOR_LOGIC_ALL_TAG_SMT2);
+  INSERT ("ALL_SUPPORTED", BTOR_LOGIC_ALL_TAG_SMT2);
 }
 
 static BtorSMT2Parser *
@@ -1807,55 +1816,10 @@ check_not_array_or_uf_args_smt2 (BtorSMT2Parser *parser,
 }
 
 static BoolectorNode *
-translate_rotate_smt2 (Btor *btor,
-                       BoolectorNode *exp,
-                       uint32_t shift,
-                       uint32_t left)
-{
-  BoolectorNode *l, *r, *res;
-  uint32_t width;
-
-  width = boolector_get_width (btor, exp);
-  assert (width > 0);
-  shift %= width;
-
-  if (shift)
-  {
-    if (left) shift = width - shift;
-
-    assert (1 <= shift && shift < width);
-
-    l = boolector_slice (btor, exp, shift - 1, 0);
-    r = boolector_slice (btor, exp, width - 1, shift);
-
-    res = boolector_concat (btor, l, r);
-
-    boolector_release (btor, l);
-    boolector_release (btor, r);
-  }
-  else
-    res = boolector_copy (btor, exp);
-  assert (boolector_get_width (btor, res) == width);
-  return res;
-}
-
-static BoolectorNode *
-rotate_left_smt2 (Btor *btor, BoolectorNode *exp, int32_t shift)
-{
-  return translate_rotate_smt2 (btor, exp, shift, 1);
-}
-
-static BoolectorNode *
-rotate_right_smt2 (Btor *btor, BoolectorNode *exp, int32_t shift)
-{
-  return translate_rotate_smt2 (btor, exp, shift, 0);
-}
-
-static BoolectorNode *
 translate_ext_rotate_smt2 (Btor *btor,
                            BoolectorNode *exp,
                            BoolectorNode *shift,
-                           int32_t left)
+                           bool is_left)
 {
   assert (boolector_is_const (btor, shift));
 
@@ -1870,7 +1834,8 @@ translate_ext_rotate_smt2 (Btor *btor,
 
   assert (shift_width < boolector_get_width (btor, exp));
 
-  return translate_rotate_smt2 (btor, exp, shift_width, left);
+  return is_left ? boolector_roli (btor, exp, shift_width)
+                 : boolector_rori (btor, exp, shift_width);
 }
 
 static int32_t parse_sort (BtorSMT2Parser *parser,
@@ -2188,7 +2153,7 @@ close_term_rotate_bv_fun (BtorSMT2Parser *parser,
                           uint32_t nargs,
                           BoolectorNode *(*fun) (Btor *,
                                                  BoolectorNode *,
-                                                 int32_t))
+                                                 uint32_t))
 {
   assert (parser);
   assert (item_open);
@@ -2399,6 +2364,19 @@ close_term (BtorSMT2Parser *parser)
       parser->work.top--;
       assert (item_open + 1 == parser->work.top);
     }
+  }
+  else if (tag == BTOR_AS_TAG_SMT2)
+  {
+    if (nargs != 1)
+    {
+      parser->perrcoo = item_cur->coo;
+      return !perr_smt2 (
+          parser,
+          "expected exactly one argument for ((as ...) but got %u",
+          nargs);
+    }
+    exp = boolector_const_array (btor, item_cur->sort, item_cur[1].exp);
+    release_exp_and_overwrite (parser, item_open, item_cur, nargs, exp);
   }
   /* CORE: NOT -------------------------------------------------------------- */
   else if (tag == BTOR_NOT_TAG_SMT2)
@@ -2881,7 +2859,7 @@ close_term (BtorSMT2Parser *parser)
   else if (tag == BTOR_BV_ROTATE_LEFT_TAG_SMT2)
   {
     if (!close_term_rotate_bv_fun (
-            parser, item_open, item_cur, nargs, rotate_left_smt2))
+            parser, item_open, item_cur, nargs, boolector_roli))
     {
       return 0;
     }
@@ -2890,7 +2868,7 @@ close_term (BtorSMT2Parser *parser)
   else if (tag == BTOR_BV_ROTATE_RIGHT_TAG_SMT2)
   {
     if (!close_term_rotate_bv_fun (
-            parser, item_open, item_cur, nargs, rotate_right_smt2))
+            parser, item_open, item_cur, nargs, boolector_rori))
     {
       return 0;
     }
@@ -3363,6 +3341,68 @@ parse_open_term_indexed (BtorSMT2Parser *parser, BtorSMT2Item *item_cur)
 }
 
 static int32_t
+parse_open_term_as (BtorSMT2Parser *parser, BtorSMT2Item *item_cur)
+{
+  assert (parser);
+  assert (item_cur);
+
+  const char *identifier;
+  int32_t tag;
+  BtorSMT2Node *node;
+  BtorSMT2Item *item_open;
+
+  if (!prev_item_was_lpar_smt2 (parser)) return 0;
+
+  if (BTOR_COUNT_STACK (parser->work) < 3)
+  {
+    assert (BTOR_COUNT_STACK (parser->work) == 2);
+    assert (parser->work.start[0].tag == BTOR_LPAR_TAG_SMT2);
+    assert (parser->work.start[1].tag == BTOR_UNDERSCORE_TAG_SMT2);
+    parser->perrcoo = parser->work.start[0].coo;
+    return !perr_smt2 (parser, "expected '(' before '(as'");
+  }
+  if (parser->work.top[-3].tag != BTOR_LPAR_TAG_SMT2)
+  {
+    parser->perrcoo = parser->work.top[-3].coo;
+    return !perr_smt2 (parser,
+                       "expected '(' at '%s' before '(as'",
+                       item2str_smt2 (parser->work.top - 3));
+  }
+
+  tag  = read_token_smt2 (parser);
+  node = parser->last_node;
+
+  if (tag == BTOR_INVALID_TAG_SMT2) return 0;
+  if (tag == EOF)
+    return !perr_smt2 (parser, "unexpected end-of-file after '_'");
+  if (tag != BTOR_SYMBOL_TAG_SMT2)
+  {
+    return !perr_smt2 (parser, "expected identifier");
+  }
+
+  identifier = node->name;
+  item_open  = item_cur - 1;
+
+  if (!strcmp (identifier, "const"))
+  {
+    tag = read_token_smt2 (parser);
+    if (!parse_sort (parser, tag, true, &item_open->sort)) return 0;
+    assert (item_open->sort);
+  }
+  else
+  {
+    return !perr_smt2 (parser, "invalid identifier '%s'", identifier);
+  }
+
+  item_open->tag   = BTOR_AS_TAG_SMT2;
+  parser->work.top = item_cur;
+  if (!read_rpar_smt2 (parser, " to close (as ")) return 0;
+  assert (parser->open > 0);
+  parser->open--;
+  return 1;
+}
+
+static int32_t
 parse_open_term_item_with_node (BtorSMT2Parser *parser,
                                 int32_t tag,
                                 BtorSMT2Item *item_cur)
@@ -3410,6 +3450,10 @@ parse_open_term_item_with_node (BtorSMT2Parser *parser,
     else if (tag == BTOR_UNDERSCORE_TAG_SMT2)
     {
       if (!parse_open_term_indexed (parser, item_cur)) return 0;
+    }
+    else if (tag == BTOR_AS_TAG_SMT2)
+    {
+      if (!parse_open_term_as (parser, item_cur)) return 0;
     }
     else
     {
@@ -3879,6 +3923,7 @@ declare_fun_smt2 (BtorSMT2Parser *parser, bool isconst)
 {
   uint32_t i;
   int32_t tag;
+  bool is_bool_var = false;
   BoolectorSortStack args;
   BtorSMT2Node *fun;
   fun = 0;
@@ -3929,6 +3974,7 @@ declare_fun_smt2 (BtorSMT2Parser *parser, bool isconst)
 
   /* parse return sort */
   tag = read_token_smt2 (parser);
+  is_bool_var = tag == BTOR_BOOL_TAG_SMT2;
   if (!parse_sort (parser, tag, true, &sort))
   {
     BTOR_RELEASE_STACK (args);
@@ -3951,6 +3997,7 @@ declare_fun_smt2 (BtorSMT2Parser *parser, bool isconst)
     else
     {
       fun->exp = boolector_var (parser->btor, sort, fun->name);
+      if (is_bool_var) boolector_var_mark_bool (parser->btor, fun->exp);
       BTOR_MSG (boolector_get_btor_msg (parser->btor),
                 2,
                 "declared '%s' as bit-vector at line %d column %d",
@@ -4400,6 +4447,22 @@ set_option_smt2 (BtorSMT2Parser *parser)
       return !perr_smt2 (
           parser, "expected Boolean argument at '%s'", parser->token.start);
   }
+  else if (tag == BTOR_GLOBAL_DECLARATIONS_TAG_SMT2)
+  {
+    tag = read_token_smt2 (parser);
+    if (tag == BTOR_INVALID_TAG_SMT2)
+    {
+      assert (parser->error);
+      return 0;
+    }
+    if (tag == BTOR_FALSE_TAG_SMT2)
+      parser->global_declarations = false;
+    else if (tag == BTOR_TRUE_TAG_SMT2)
+      parser->global_declarations = true;
+    else
+      return !perr_smt2 (
+          parser, "expected Boolean argument at '%s'", parser->token.start);
+  }
   /* boolector specific options */
   else
   {
@@ -4469,7 +4532,9 @@ check_sat (BtorSMT2Parser *parser)
       fprintf (parser->outfile, "sat\n");
     else if (parser->res->result == BOOLECTOR_UNSAT)
       fprintf (parser->outfile, "unsat\n");
-    else
+    /* Do not print 'unknown' if we print DIMACS. 'unknown' is only returned if
+     * SAT solver is used non-incremental. */
+    else if (!boolector_get_opt (parser->btor, BTOR_OPT_PRINT_DIMACS))
       fprintf (parser->outfile, "unknown\n");
     fflush (parser->outfile);
   }
@@ -4599,13 +4664,7 @@ read_command_smt2 (BtorSMT2Parser *parser)
         case BTOR_LOGIC_QF_ABV_TAG_SMT2:
           parser->res->logic = BTOR_LOGIC_QF_AUFBV;
           break;
-        case BTOR_LOGIC_ABV_TAG_SMT2:
-          parser->res->logic = BTOR_LOGIC_QF_ABV;
-          break;
         case BTOR_LOGIC_BV_TAG_SMT2: parser->res->logic = BTOR_LOGIC_BV; break;
-        case BTOR_LOGIC_UFBV_TAG_SMT2:
-          parser->res->logic = BTOR_LOGIC_QF_UFBV;
-          break;
         case BTOR_LOGIC_ALL_TAG_SMT2:
           parser->res->logic = BTOR_LOGIC_ALL;
           break;
@@ -4741,7 +4800,15 @@ read_command_smt2 (BtorSMT2Parser *parser)
       if (!boolector_get_opt (parser->btor, BTOR_OPT_MODEL_GEN))
         return !perr_smt2 (parser, "model generation is not enabled");
       if (parser->res->result != BOOLECTOR_SAT) break;
-      boolector_print_model (parser->btor, "smt2", parser->outfile);
+      if (boolector_get_opt (parser->btor, BTOR_OPT_OUTPUT_FORMAT)
+          == BTOR_OUTPUT_FORMAT_BTOR)
+      {
+        boolector_print_model (parser->btor, "btor", parser->outfile);
+      }
+      else
+      {
+        boolector_print_model (parser->btor, "smt2", parser->outfile);
+      }
       fflush (parser->outfile);
       break;
 

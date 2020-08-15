@@ -2,8 +2,8 @@
  *
  *  Copyright (C) 2007-2009 Robert Daniel Brummayer.
  *  Copyright (C) 2007-2017 Armin Biere.
- *  Copyright (C) 2013-2017 Mathias Preiner.
- *  Copyright (C) 2014-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2020 Mathias Preiner.
+ *  Copyright (C) 2014-2019 Aina Niemetz.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -136,8 +136,7 @@ check_rw_cache (
     if (result)
     {
       btor->rw_cache->num_get++;
-      result = btor_node_copy (
-          btor, btor_pointer_chase_simplified_exp (btor, result));
+      result = btor_node_copy (btor, btor_node_get_simplified (btor, result));
     }
   }
   return result;
@@ -375,7 +374,7 @@ cmp_node_id (const void *p, const void *q)
 {
   BtorNode *a = *(BtorNode **) p;
   BtorNode *b = *(BtorNode **) q;
-  return btor_node_real_addr (a)->id - btor_node_real_addr (b)->id;
+  return btor_node_get_id (a) - btor_node_get_id (b);
 }
 
 static bool
@@ -520,9 +519,9 @@ is_urem_exp (Btor *btor,
 {
   BtorNode *mul, *udiv, *x, *y;
 
-  if (btor_node_is_neg (btor, e0, &mul))
+  if (btor_node_bv_is_neg (btor, e0, &mul))
     x = e1;
-  else if (btor_node_is_neg (btor, e1, &mul))
+  else if (btor_node_bv_is_neg (btor, e1, &mul))
     x = e0;
   else
     return false;
@@ -1692,7 +1691,8 @@ applies_zero_lower_slice (Btor *btor,
                           uint32_t lower)
 {
   (void) upper;
-  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+  return btor_opt_get (btor, BTOR_OPT_RW_ZERO_LOWER_SLICE)
+         && btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
          && btor->rec_rw_calls < BTOR_REC_RW_BOUND && lower == 0
          && upper < btor_node_bv_get_width (btor, exp) / 2
          && (btor_node_is_bv_mul (exp) || btor_node_is_bv_add (exp));
@@ -1941,9 +1941,9 @@ applies_sub_eq (Btor *btor, BtorNode *e0, BtorNode *e1)
          && btor->rec_rw_calls < BTOR_REC_RW_BOUND && btor_node_is_regular (e1)
          && btor_node_is_bv_add (e1)
          && ((btor_node_is_regular (e1->e[0])
-              && btor_node_is_neg (btor, e1->e[0], 0))
+              && btor_node_bv_is_neg (btor, e1->e[0], 0))
              || (btor_node_is_regular (e1->e[1])
-                 && btor_node_is_neg (btor, e1->e[1], 0)));
+                 && btor_node_bv_is_neg (btor, e1->e[1], 0)));
 }
 
 static inline BtorNode *
@@ -1954,11 +1954,11 @@ apply_sub_eq (Btor *btor, BtorNode *e0, BtorNode *e1)
   BtorNode *result;
   BtorNode *neg = 0, *other;
 
-  if (btor_node_is_neg (btor, e1->e[0], &neg))
+  if (btor_node_bv_is_neg (btor, e1->e[0], &neg))
     other = e1->e[1];
   else
   {
-    btor_node_is_neg (btor, e1->e[1], &neg);
+    btor_node_bv_is_neg (btor, e1->e[1], &neg);
     other = e1->e[0];
   }
   assert (neg);
@@ -3265,6 +3265,38 @@ apply_concat_and (Btor *btor, BtorNode *e0, BtorNode *e1)
   return result;
 }
 
+static inline bool
+applies_push_ite_and (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND && btor_node_is_cond (e0)
+         && (btor_node_is_bv_const_zero (btor, btor_node_real_addr (e0)->e[1])
+             || btor_node_is_bv_const_zero (btor,
+                                            btor_node_real_addr (e0)->e[2]));
+}
+
+static inline BtorNode *
+apply_push_ite_and (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_push_ite_and (btor, e0, e1));
+
+  BtorNode *result, *and_left, *and_right, *real_e0;
+
+  real_e0 = btor_node_real_addr (e0);
+  BTOR_INC_REC_RW_CALL (btor);
+  and_left =
+      rewrite_and_exp (btor, btor_node_cond_invert (e0, real_e0->e[1]), e1);
+  and_right =
+      rewrite_and_exp (btor, btor_node_cond_invert (e0, real_e0->e[2]), e1);
+
+  result = rewrite_cond_exp (btor, real_e0->e[0], and_left, and_right);
+  BTOR_DEC_REC_RW_CALL (btor);
+  btor_node_release (btor, and_left);
+  btor_node_release (btor, and_right);
+  return result;
+}
+
 #if 0
 /*
  * match:
@@ -3614,6 +3646,64 @@ apply_const_neg_rhs_add (Btor *btor, BtorNode *e0, BtorNode *e1)
 }
 
 /*
+ * match:  (a + (b << a))
+ * result: (a | (b << a))
+ */
+static inline bool
+applies_sll_add (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND
+         && !btor_node_is_inverted (e1) && btor_node_is_bv_sll (e1)
+         && btor_node_is_bv_slice (e1->e[1])
+         && !btor_node_is_inverted (e1->e[1]) && e0 == e1->e[1]->e[0];
+}
+
+static inline BtorNode *
+apply_sll_add (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_sll_add (btor, e0, e1));
+
+  BtorNode *result;
+  BTOR_INC_REC_RW_CALL (btor);
+  result = btor_node_invert (
+      rewrite_and_exp (btor, btor_node_invert (e0), btor_node_invert (e1)));
+  BTOR_DEC_REC_RW_CALL (btor);
+  return result;
+}
+
+static inline bool
+applies_push_ite_add (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND && btor_node_is_cond (e0)
+         && !btor_node_is_inverted (e0)
+         && (btor_node_is_bv_const_zero (btor, e0->e[1])
+             || btor_node_is_bv_const_zero (btor, e0->e[2]));
+}
+
+static inline BtorNode *
+apply_push_ite_add (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_push_ite_add (btor, e0, e1));
+
+  BtorNode *result, *add_left, *add_right;
+
+  BTOR_INC_REC_RW_CALL (btor);
+  add_left  = rewrite_add_exp (btor, e0->e[1], e1);
+  add_right = rewrite_add_exp (btor, e0->e[2], e1);
+
+  assert (add_left == e1 || add_right == e1);
+
+  result = rewrite_cond_exp (btor, e0->e[0], add_left, add_right);
+  BTOR_DEC_REC_RW_CALL (btor);
+  btor_node_release (btor, add_left);
+  btor_node_release (btor, add_right);
+  return result;
+}
+
+/*
  * match:  a + a
  * result: 2 * a
  */
@@ -3827,6 +3917,92 @@ apply_const_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
   BTOR_DEC_REC_RW_CALL (btor);
   btor_node_release (btor, left);
   btor_node_release (btor, right);
+  return result;
+}
+
+/*
+ *
+ *
+ */
+static inline bool
+applies_push_ite_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND && btor_node_is_cond (e0)
+         && !btor_node_is_inverted (e0)
+         && (btor_node_is_bv_const_zero (btor, e0->e[1])
+             || btor_node_is_bv_const_zero (btor, e0->e[2]));
+}
+
+static inline BtorNode *
+apply_push_ite_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_push_ite_mul (btor, e0, e1));
+
+  BtorNode *result, *mul_left, *mul_right;
+
+  BTOR_INC_REC_RW_CALL (btor);
+  mul_left  = rewrite_mul_exp (btor, e0->e[1], e1);
+  mul_right = rewrite_mul_exp (btor, e0->e[2], e1);
+
+  assert (btor_node_is_bv_const_zero (btor, mul_left)
+          || btor_node_is_bv_const_zero (btor, mul_right));
+
+  result = rewrite_cond_exp (btor, e0->e[0], mul_left, mul_right);
+  BTOR_DEC_REC_RW_CALL (btor);
+  btor_node_release (btor, mul_left);
+  btor_node_release (btor, mul_right);
+  return result;
+}
+
+static inline bool
+applies_sll_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND && btor_node_is_bv_sll (e0)
+         && !btor_node_is_inverted (e0);
+}
+
+static inline BtorNode *
+apply_sll_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_sll_mul (btor, e0, e1));
+
+  BtorNode *result, *mul;
+
+  BTOR_INC_REC_RW_CALL (btor);
+  mul    = rewrite_mul_exp (btor, e0->e[0], e1);
+  result = rewrite_sll_exp (btor, mul, e0->e[1]);
+  BTOR_DEC_REC_RW_CALL (btor);
+  btor_node_release (btor, mul);
+  return result;
+}
+
+static inline bool
+applies_neg_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  return btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
+         && btor->rec_rw_calls < BTOR_REC_RW_BOUND
+         && btor_node_bv_is_neg (btor, e0, 0)
+         && btor_node_bv_is_neg (btor, e1, 0);
+}
+
+static inline BtorNode *
+apply_neg_mul (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  assert (applies_neg_mul (btor, e0, e1));
+
+  BtorNode *result, *a, *b;
+
+  btor_node_bv_is_neg (btor, e0, &a);
+  btor_node_bv_is_neg (btor, e1, &b);
+
+  BTOR_INC_REC_RW_CALL (btor);
+  result = rewrite_mul_exp (btor, a, b);
+  BTOR_DEC_REC_RW_CALL (btor);
   return result;
 }
 
@@ -4335,7 +4511,7 @@ apply_const_sll (Btor *btor, BtorNode *e0, BtorNode *e1)
 {
   assert (applies_const_sll (btor, e0, e1));
 
-  uint32_t shiftlen;
+  uint32_t shiftlen, width;
   BtorBitVector *bits;
   BtorNode *result, *real_e0, *real_e1, *pad, *slice;
   BtorSortId sort;
@@ -4346,21 +4522,31 @@ apply_const_sll (Btor *btor, BtorNode *e0, BtorNode *e1)
   if (is_const_zero_exp (btor, e1)) return btor_node_copy (btor, e0);
 
   bits = btor_node_bv_const_get_bits (real_e1);
+  width = btor_node_bv_get_width (btor, real_e0);
+  assert (btor_bv_get_width (bits) == width);
   if (btor_node_is_inverted (e1)) bits = btor_bv_not (btor->mm, bits);
   shiftlen = (uint32_t) btor_bv_to_uint64 (bits);
-  if (btor_node_is_inverted (e1)) btor_bv_free (btor->mm, bits);
   assert (shiftlen > 0);
-  assert (shiftlen < btor_node_bv_get_width (btor, real_e0));
-  BTOR_INC_REC_RW_CALL (btor);
-  sort = btor_sort_bv (btor, shiftlen);
-  pad  = btor_exp_bv_zero (btor, sort);
-  btor_sort_release (btor, sort);
-  slice = rewrite_slice_exp (
-      btor, e0, btor_node_bv_get_width (btor, real_e0) - shiftlen - 1, 0);
-  result = rewrite_concat_exp (btor, slice, pad);
-  BTOR_DEC_REC_RW_CALL (btor);
-  btor_node_release (btor, pad);
-  btor_node_release (btor, slice);
+  if (btor_node_is_inverted (e1)) btor_bv_free (btor->mm, bits);
+  if (shiftlen >= width)
+  {
+    sort   = btor_sort_bv (btor, width);
+    result = btor_exp_bv_zero (btor, sort);
+    btor_sort_release (btor, sort);
+  }
+  else
+  {
+    BTOR_INC_REC_RW_CALL (btor);
+    sort = btor_sort_bv (btor, shiftlen);
+    pad  = btor_exp_bv_zero (btor, sort);
+    btor_sort_release (btor, sort);
+    slice = rewrite_slice_exp (
+        btor, e0, btor_node_bv_get_width (btor, real_e0) - shiftlen - 1, 0);
+    result = rewrite_concat_exp (btor, slice, pad);
+    BTOR_DEC_REC_RW_CALL (btor);
+    btor_node_release (btor, pad);
+    btor_node_release (btor, slice);
+  }
   assert (btor_node_get_sort_id (result) == btor_node_get_sort_id (real_e0));
   return result;
 }
@@ -4385,7 +4571,7 @@ apply_const_srl (Btor *btor, BtorNode *e0, BtorNode *e1)
 {
   assert (applies_const_srl (btor, e0, e1));
 
-  uint32_t shiftlen;
+  uint32_t width, shiftlen;
   BtorBitVector *bits;
   BtorNode *result, *real_e0, *real_e1, *pad, *slice;
   BtorSortId sort;
@@ -4396,23 +4582,53 @@ apply_const_srl (Btor *btor, BtorNode *e0, BtorNode *e1)
   if (is_const_zero_exp (btor, e1)) return btor_node_copy (btor, e0);
 
   bits = btor_node_bv_const_get_bits (real_e1);
+  width = btor_node_bv_get_width (btor, real_e0);
+  assert (btor_bv_get_width (bits) == width);
   if (btor_node_is_inverted (e1)) bits = btor_bv_not (btor->mm, bits);
   shiftlen = (uint32_t) btor_bv_to_uint64 (bits);
-  if (btor_node_is_inverted (e1)) btor_bv_free (btor->mm, bits);
   assert (shiftlen > 0);
-  assert (shiftlen < btor_node_bv_get_width (btor, real_e0));
-  BTOR_INC_REC_RW_CALL (btor);
-  sort = btor_sort_bv (btor, shiftlen);
-  pad  = btor_exp_bv_zero (btor, sort);
-  btor_sort_release (btor, sort);
-  slice = rewrite_slice_exp (
-      btor, e0, btor_node_bv_get_width (btor, real_e0) - 1, shiftlen);
-  result = rewrite_concat_exp (btor, pad, slice);
-  BTOR_DEC_REC_RW_CALL (btor);
-  btor_node_release (btor, pad);
-  btor_node_release (btor, slice);
+  if (btor_node_is_inverted (e1)) btor_bv_free (btor->mm, bits);
+  if (shiftlen >= width)
+  {
+    sort   = btor_sort_bv (btor, width);
+    result = btor_exp_bv_zero (btor, sort);
+    btor_sort_release (btor, sort);
+  }
+  else
+  {
+    BTOR_INC_REC_RW_CALL (btor);
+    sort = btor_sort_bv (btor, shiftlen);
+    pad  = btor_exp_bv_zero (btor, sort);
+    btor_sort_release (btor, sort);
+    slice = rewrite_slice_exp (
+        btor, e0, btor_node_bv_get_width (btor, real_e0) - 1, shiftlen);
+    result = rewrite_concat_exp (btor, pad, slice);
+    BTOR_DEC_REC_RW_CALL (btor);
+    btor_node_release (btor, pad);
+    btor_node_release (btor, slice);
+  }
   assert (btor_node_get_sort_id (result) == btor_node_get_sort_id (real_e0));
   return result;
+}
+
+/*
+ * e0 >> e0 == 0
+ * match:  e0_[bw] == e1_[bw]
+ * result: 0_[bw]
+ */
+static inline bool
+applies_same_srl (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) btor;
+  return e0 == e1;
+}
+
+static inline BtorNode *
+apply_same_srl (Btor *btor, BtorNode *e0, BtorNode *e1)
+{
+  (void) e1;
+  assert (applies_same_srl (btor, e0, e1));
+  return btor_exp_bv_zero (btor, btor_node_get_sort_id (e0));
 }
 
 /* APPLY rules                                                                */
@@ -4839,9 +5055,16 @@ apply_prop_apply_update (Btor *btor, BtorNode *e0, BtorNode *e1)
   /* propagated until 'cur', create apply on 'cur' */
   if (!result)
   {
-    BTOR_INC_REC_RW_CALL (btor);
-    result = btor_node_create_apply (btor, cur, e1);
-    BTOR_DEC_REC_RW_CALL (btor);
+    if (btor_node_is_const_array (cur))
+    {
+      result = btor_node_copy (btor, cur->e[1]);
+    }
+    else
+    {
+      BTOR_INC_REC_RW_CALL (btor);
+      result = btor_node_create_apply (btor, cur, e1);
+      BTOR_DEC_REC_RW_CALL (btor);
+    }
   }
   btor->stats.prop_apply_update += propagations;
   return result;
@@ -5565,6 +5788,44 @@ apply_cond (Btor * btor, BtorNode * e0, BtorNode * e1, BtorNode * e2)
 /* normalizers                                                                */
 /* -------------------------------------------------------------------------- */
 
+static BtorNode *
+mk_norm_node_from_hash_table (Btor *btor,
+                              BtorNodeKind kind,
+                              BtorPtrHashTable *nodes)
+{
+  assert (nodes->count > 0);
+
+  size_t i;
+  BtorNode *cur, *tmp, *result;
+  BtorNodePtrStack stack;
+  BtorPtrHashTableIterator it;
+  BtorHashTableData *d;
+
+  BTOR_INIT_STACK (btor->mm, stack);
+  btor_iter_hashptr_init (&it, nodes);
+  while (btor_iter_hashptr_has_next (&it))
+  {
+    cur = it.cur;
+    d   = btor_iter_hashptr_next_data (&it);
+    for (i = 0; i < (size_t) d->as_int; i++) BTOR_PUSH_STACK (stack, cur);
+  }
+
+  qsort (
+      stack.start, BTOR_COUNT_STACK (stack), sizeof (BtorNode *), cmp_node_id);
+
+  assert (!BTOR_EMPTY_STACK (stack));
+  result = btor_node_copy (btor, BTOR_PEEK_STACK (stack, 0));
+  for (i = 1; i < BTOR_COUNT_STACK (stack); i++)
+  {
+    cur = BTOR_PEEK_STACK (stack, i);
+    tmp = btor_rewrite_binary_exp (btor, kind, result, cur);
+    btor_node_release (btor, result);
+    result = tmp;
+  }
+  BTOR_RELEASE_STACK (stack);
+  return result;
+}
+
 static void
 normalize_bin_comm_ass_exp (Btor *btor,
                             BtorNode *e0,
@@ -5586,18 +5847,20 @@ normalize_bin_comm_ass_exp (Btor *btor,
           || btor_node_is_bv_mul (e0));
   assert (e0->kind == e1->kind);
 
-  size_t i;
   BtorNodeKind kind;
-  BtorNode *cur, *result, *temp, *common;
+  BtorNode *cur, *common;
   BtorNodePtrStack stack;
   BtorMemMgr *mm;
   BtorPtrHashTable *left, *right, *comm;
   BtorPtrHashBucket *b;
-  BtorPtrHashTableIterator it;
   BtorIntHashTable *cache;
+  BtorHashTableData *d;
+  bool normalize_all = true, need_restart = false;
 
   mm    = btor->mm;
   kind  = e0->kind;
+
+RESTART_NORMALIZE:
   left  = btor_hashptr_table_new (mm,
                                  (BtorHashPtr) btor_node_hash_by_id,
                                  (BtorCmpPtr) btor_node_compare_by_id);
@@ -5607,11 +5870,16 @@ normalize_bin_comm_ass_exp (Btor *btor,
   comm  = btor_hashptr_table_new (mm,
                                  (BtorHashPtr) btor_node_hash_by_id,
                                  (BtorCmpPtr) btor_node_compare_by_id);
-  cache = btor_hashint_table_new (mm);
+  cache = btor_hashint_map_new (mm);
 
   if (!btor_opt_get (btor, BTOR_OPT_NORMALIZE))
     goto RETURN_NO_RESULT;
 
+  /* We first try to normalize all nodes, i.e., we do a tree traversal on e0
+   * and e1. If we encounter a node more than 32 times, we restart and do a
+   * DAG traversal. The 'need_restart' flag indicates whether we actually need
+   * to do a DAG traversal after the first pass, which is the case if a node
+   * was visited more than once. */
   BTOR_INIT_STACK (mm, stack);
   BTOR_PUSH_STACK (stack, e0);
   do
@@ -5619,26 +5887,41 @@ normalize_bin_comm_ass_exp (Btor *btor,
     cur = BTOR_POP_STACK (stack);
     if (!btor_node_is_inverted (cur) && cur->kind == kind)
     {
-      if (btor_hashint_table_contains (cache, cur->id))
+      d = btor_hashint_map_get (cache, cur->id);
+      if (d)
+      {
+        if (normalize_all)
+        {
+          need_restart = true;
+        }
+        else
+        {
+          BTOR_RELEASE_STACK (stack);
+          goto RETURN_NO_RESULT;
+        }
+      }
+      else
+      {
+        d = btor_hashint_map_add (cache, cur->id);
+      }
+      d->as_int += 1;
+      if (d->as_int > 32)
       {
         BTOR_RELEASE_STACK (stack);
-        goto RETURN_NO_RESULT;
+        goto RESTART_NORMALIZE_ALL;
       }
-      btor_hashint_table_add (cache, cur->id);
       BTOR_PUSH_STACK (stack, cur->e[1]);
       BTOR_PUSH_STACK (stack, cur->e[0]);
     }
     else
     {
-      b = btor_hashptr_table_get (left, cur);
-      if (!b)
-        btor_hashptr_table_add (left, cur)->data.as_int = 1;
-      else
-        b->data.as_int++;
+      if (!(b = btor_hashptr_table_get (left, cur)))
+        b = btor_hashptr_table_add (left, cur);
+      b->data.as_int++;
     }
   } while (!BTOR_EMPTY_STACK (stack));
-  btor_hashint_table_delete (cache);
-  cache = btor_hashint_table_new (mm);
+  btor_hashint_map_delete (cache);
+  cache = btor_hashint_map_new (mm);
 
   BTOR_PUSH_STACK (stack, e1);
   do
@@ -5646,12 +5929,29 @@ normalize_bin_comm_ass_exp (Btor *btor,
     cur = BTOR_POP_STACK (stack);
     if (!btor_node_is_inverted (cur) && cur->kind == kind)
     {
-      if (btor_hashint_table_contains (cache, cur->id))
+      d = btor_hashint_map_get (cache, cur->id);
+      if (d)
+      {
+        if (normalize_all)
+        {
+          need_restart = true;
+        }
+        else
+        {
+          BTOR_RELEASE_STACK (stack);
+          goto RETURN_NO_RESULT;
+        }
+      }
+      else
+      {
+        d = btor_hashint_map_add (cache, cur->id);
+      }
+      d->as_int += 1;
+      if (d->as_int > 32)
       {
         BTOR_RELEASE_STACK (stack);
-        goto RETURN_NO_RESULT;
+        goto RESTART_NORMALIZE_ALL;
       }
-      btor_hashint_table_add (cache, cur->id);
       BTOR_PUSH_STACK (stack, cur->e[1]);
       BTOR_PUSH_STACK (stack, cur->e[0]);
     }
@@ -5672,20 +5972,16 @@ normalize_bin_comm_ass_exp (Btor *btor,
         }
 
         /* insert into common table */
-        b = btor_hashptr_table_get (comm, cur);
-        if (!b)
-          btor_hashptr_table_add (comm, cur)->data.as_int = 1;
-        else
-          b->data.as_int++;
+        if (!(b = btor_hashptr_table_get (comm, cur)))
+          b = btor_hashptr_table_add (comm, cur);
+        b->data.as_int++;
       }
       else
       {
         /* operand is not common */
-        b = btor_hashptr_table_get (right, cur);
-        if (!b)
-          btor_hashptr_table_add (right, cur)->data.as_int = 1;
-        else
-          b->data.as_int++;
+        if (!(b = btor_hashptr_table_get (right, cur)))
+          b = btor_hashptr_table_add (right, cur);
+        b->data.as_int++;
       }
     }
   } while (!BTOR_EMPTY_STACK (stack));
@@ -5699,10 +5995,21 @@ normalize_bin_comm_ass_exp (Btor *btor,
     btor_hashptr_table_delete (left);
     btor_hashptr_table_delete (right);
     btor_hashptr_table_delete (comm);
-    btor_hashint_table_delete (cache);
+    btor_hashint_map_delete (cache);
     *e0_norm = btor_node_copy (btor, e0);
     *e1_norm = btor_node_copy (btor, e1);
     return;
+  }
+
+  if (normalize_all && need_restart && (left->count > 0 || right->count > 0))
+  {
+RESTART_NORMALIZE_ALL:
+    normalize_all = false;
+    btor_hashptr_table_delete (left);
+    btor_hashptr_table_delete (right);
+    btor_hashptr_table_delete (comm);
+    btor_hashint_map_delete (cache);
+    goto RESTART_NORMALIZE;
   }
 
   if (kind == BTOR_BV_AND_NODE)
@@ -5718,159 +6025,52 @@ normalize_bin_comm_ass_exp (Btor *btor,
   assert (comm->count >= 2u);
 
   /* normalize common nodes */
-  BTOR_INIT_STACK (mm, stack);
-  b = comm->first;
-  while (b)
-  {
-    cur = b->key;
-    assert (b->data.as_int >= 0);
-    for (i = 0; i < (size_t) b->data.as_int; i++) BTOR_PUSH_STACK (stack, cur);
-    b = b->next;
-  }
+  common = mk_norm_node_from_hash_table (btor, kind, comm);
 
-  qsort (
-      stack.start, BTOR_COUNT_STACK (stack), sizeof (BtorNode *), cmp_node_id);
+  if (!(b = btor_hashptr_table_get (left, common)))
+    b = btor_hashptr_table_add (left, common);
+  b->data.as_int += 1;
+  *e0_norm = mk_norm_node_from_hash_table (btor, kind, left);
 
-  common = btor_node_copy (btor, BTOR_PEEK_STACK (stack, 0));
-  for (i = 1; i < BTOR_COUNT_STACK (stack); i++)
-  {
-    cur  = BTOR_PEEK_STACK (stack, i);
-    temp = btor_rewrite_binary_exp (btor, kind, common, cur);
-    btor_node_release (btor, common);
-    common = temp;
-  }
-  BTOR_RELEASE_STACK (stack);
-
-#if 0
-  /* normalize left side */
-  result = btor_node_copy (btor, common);
-  btor_iter_hashptr_init (&it, left);
-  while (btor_iter_hashptr_has_next (&it))
-    {
-      b = it.bucket;
-      cur = btor_iter_hashptr_next (&it);
-      for (i = 0; i < b->data.as_int; i++)
-	{
-	  temp = fptr (btor, result, cur);
-	  btor_node_release (btor, result);
-	  result = temp;
-	}
-    }
-  *e0_norm = result;
-
-  /* normalize right side */
-  result = btor_node_copy (btor, common);
-  btor_iter_hashptr_init (&it, right);
-  while (btor_iter_hashptr_has_next (&it))
-    {
-      b = it.bucket;
-      cur = btor_iter_hashptr_next (&it);
-      for (i = 0; i < b->data.as_int; i++)
-	{
-	  temp = fptr (btor, result, cur);
-	  btor_node_release (btor, result);
-	  result = temp;
-	}
-    }
-  *e1_norm = result;
-#else
-  /* Bubble up common part.
-   */
-  result = 0;
-  btor_iter_hashptr_init (&it, left);
-  while (btor_iter_hashptr_has_next (&it))
-  {
-    b   = it.bucket;
-    cur = btor_iter_hashptr_next (&it);
-    assert (b->data.as_int >= 0);
-    for (i = 0; i < (size_t) b->data.as_int; i++)
-    {
-      if (result)
-      {
-        temp = btor_rewrite_binary_exp (btor, kind, result, cur);
-        btor_node_release (btor, result);
-        result = temp;
-      }
-      else
-        result = btor_node_copy (btor, cur);
-    }
-  }
-
-  if (result)
-  {
-    temp = btor_rewrite_binary_exp (btor, kind, common, result);
-    btor_node_release (btor, result);
-    result = temp;
-  }
-  else
-    result = btor_node_copy (btor, common);
-
-  *e0_norm = result;
-
-  result = 0;
-  btor_iter_hashptr_init (&it, right);
-  while (btor_iter_hashptr_has_next (&it))
-  {
-    b   = it.bucket;
-    cur = btor_iter_hashptr_next (&it);
-    assert (b->data.as_int >= 0);
-    for (i = 0; i < (size_t) b->data.as_int; i++)
-    {
-      if (result)
-      {
-        temp = btor_rewrite_binary_exp (btor, kind, result, cur);
-        btor_node_release (btor, result);
-        result = temp;
-      }
-      else
-        result = btor_node_copy (btor, cur);
-    }
-  }
-
-  if (result)
-  {
-    temp = btor_rewrite_binary_exp (btor, kind, common, result);
-    btor_node_release (btor, result);
-    result = temp;
-  }
-  else
-    result = btor_node_copy (btor, common);
-
-  *e1_norm = result;
-#endif
+  if (!(b = btor_hashptr_table_get (right, common)))
+    b = btor_hashptr_table_add (right, common);
+  b->data.as_int += 1;
+  *e1_norm = mk_norm_node_from_hash_table (btor, kind, right);
 
   /* clean up */
   btor_node_release (btor, common);
   btor_hashptr_table_delete (left);
   btor_hashptr_table_delete (right);
   btor_hashptr_table_delete (comm);
-  btor_hashint_table_delete (cache);
+  btor_hashint_map_delete (cache);
 }
 
-// TODO (ma): what does this do?
 static BtorNode *
-find_top_add (Btor *btor, BtorNode *e)
+find_top_op (Btor *btor, BtorNode *e)
 {
   BtorNode *res;
-  if (btor_node_is_inverted (e)) e = btor_node_real_addr (e);
-  if (e->kind == BTOR_BV_ADD_NODE) return e;
+  e = btor_node_real_addr (e);
+  if (btor_node_is_bv_add (e) || btor_node_is_bv_mul (e)
+      || btor_node_is_bv_and (e))
+    return e;
   if (btor->rec_rw_calls >= BTOR_REC_RW_BOUND) return 0;
+
   res = 0;
-  if (e->kind == BTOR_BV_SLICE_NODE)
+  BTOR_INC_REC_RW_CALL (btor);
+  if (btor_node_is_bv_slice (e) || btor_node_is_bv_sll (e)
+      || btor_node_is_bv_srl (e))
   {
-    BTOR_INC_REC_RW_CALL (btor);
-    res = find_top_add (btor, e->e[0]);
-    BTOR_DEC_REC_RW_CALL (btor);
+    res = find_top_op (btor, e->e[0]);
   }
+  BTOR_DEC_REC_RW_CALL (btor);
 
   // TODO handle more operators ... (here first)
 
   return res;
 }
 
-// TODO (ma): what does this do?
 static BtorNode *
-rebuild_top_add (Btor *btor, BtorNode *e, BtorNode *c, BtorNode *r)
+rebuild_top_op (Btor *btor, BtorNode *e, BtorNode *c, BtorNode *r)
 {
   assert (!btor_node_is_inverted (c));
 
@@ -5878,7 +6078,7 @@ rebuild_top_add (Btor *btor, BtorNode *e, BtorNode *c, BtorNode *r)
 
   if (btor_node_is_inverted (e))
   {
-    tmp = rebuild_top_add (btor, btor_node_real_addr (e), c, r);
+    tmp = rebuild_top_op (btor, btor_node_real_addr (e), c, r);
     res = btor_node_invert (tmp);
   }
   else if (e == c)
@@ -5887,13 +6087,25 @@ rebuild_top_add (Btor *btor, BtorNode *e, BtorNode *c, BtorNode *r)
   {
     // TODO handle more operators ... (then here)
     //
-    assert (e->kind == BTOR_BV_SLICE_NODE);
-    tmp = rebuild_top_add (btor, e->e[0], c, r);
-    res = rewrite_slice_exp (btor,
-                             tmp,
-                             btor_node_bv_slice_get_upper (e),
-                             btor_node_bv_slice_get_lower (e));
+    res = 0;
+    tmp = rebuild_top_op (btor, e->e[0], c, r);
+    if (btor_node_is_bv_slice (e))
+    {
+      res = rewrite_slice_exp (btor,
+                               tmp,
+                               btor_node_bv_slice_get_upper (e),
+                               btor_node_bv_slice_get_lower (e));
+    }
+    else if (btor_node_is_bv_sll (e))
+    {
+      res = rewrite_sll_exp (btor, tmp, e->e[1]);
+    }
+    else if (btor_node_is_bv_srl (e))
+    {
+      res = rewrite_srl_exp (btor, tmp, e->e[1]);
+    }
     btor_node_release (btor, tmp);
+    assert (res);
   }
   return res;
 }
@@ -5927,7 +6139,7 @@ normalize_adds_muls_ands (Btor *btor, BtorNode **left, BtorNode **right)
 static inline void
 normalize_eq (Btor *btor, BtorNode **left, BtorNode **right)
 {
-  BtorNode *e0, *e1, *tmp1, *tmp2, *c0, *c1, *n0, *n1, *add;
+  BtorNode *e0, *e1, *tmp1, *tmp2, *op0, *op1, *c0, *c1, *n0, *n1, *add;
 
   e0 = *left;
   e1 = *right;
@@ -5948,24 +6160,27 @@ normalize_eq (Btor *btor, BtorNode **left, BtorNode **right)
     }
   }
 
+  // TODO(ma): this is probably redundant
   /* normalize adds and muls on demand */
   normalize_adds_muls_ands (btor, &e0, &e1);
 
-  // TODO (ma): what does this do?
   if (btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 2
-      && btor_opt_get (btor, BTOR_OPT_NORMALIZE_ADD)
-      && (c0 = find_top_add (btor, e0)) && (c1 = find_top_add (btor, e1))
-      && btor_node_get_sort_id (c0) == btor_node_get_sort_id (c1))
+      && (op0 = find_top_op (btor, e0)) && (op1 = find_top_op (btor, e1))
+      && btor_node_real_addr(op0)->kind == btor_node_real_addr(op1)->kind
+      && btor_node_get_sort_id (op0) == btor_node_get_sort_id (op1))
   {
-    normalize_bin_comm_ass_exp (btor, c0, c1, &n0, &n1);
-    tmp1 = rebuild_top_add (btor, e0, c0, n0);
-    tmp2 = rebuild_top_add (btor, e1, c1, n1);
-    btor_node_release (btor, n0);
-    btor_node_release (btor, n1);
-    btor_node_release (btor, e0);
-    btor_node_release (btor, e1);
-    e0 = tmp1;
-    e1 = tmp2;
+    if (!btor_node_is_bv_and(op0) || btor_opt_get (btor, BTOR_OPT_NORMALIZE_ADD))
+    {
+      normalize_bin_comm_ass_exp (btor, op0, op1, &n0, &n1);
+      tmp1 = rebuild_top_op (btor, e0, op0, n0);
+      tmp2 = rebuild_top_op (btor, e1, op1, n1);
+      btor_node_release (btor, n0);
+      btor_node_release (btor, n1);
+      btor_node_release (btor, e0);
+      btor_node_release (btor, e1);
+      e0 = tmp1;
+      e1 = tmp2;
+    }
   }
 
   // TODO (ma): check if this is also applicable to mul nodes and maybe others?
@@ -6458,6 +6673,7 @@ SWAP_OPERANDS:
     ADD_RW_RULE (const1_and, e0, e1);
     ADD_RW_RULE (const2_and, e0, e1);
     ADD_RW_RULE (concat_and, e0, e1);
+    // ADD_RW_RULE (push_ite_and, e0, e1);
 
     assert (!result);
 
@@ -6528,6 +6744,9 @@ SWAP_OPERANDS:
     ADD_RW_RULE (const_rhs_add, e0, e1);
     ADD_RW_RULE (const_neg_lhs_add, e0, e1);
     ADD_RW_RULE (const_neg_rhs_add, e0, e1);
+    ADD_RW_RULE (push_ite_add, e0, e1);
+    // TODO: enable when same bw shift is merged
+    //ADD_RW_RULE (sll_add, e0, e1);
 
     assert (!result);
 
@@ -6595,6 +6814,9 @@ SWAP_OPERANDS:
     ADD_RW_RULE (const_lhs_mul, e0, e1);
     ADD_RW_RULE (const_rhs_mul, e0, e1);
     ADD_RW_RULE (const_mul, e0, e1);
+    ADD_RW_RULE (push_ite_mul, e0, e1);
+    ADD_RW_RULE (sll_mul, e0, e1);
+    ADD_RW_RULE (neg_mul, e0, e1);
 
     assert (!result);
 
@@ -6839,6 +7061,7 @@ rewrite_srl_exp (Btor *btor, BtorNode *e0, BtorNode *e1)
     ADD_RW_RULE (special_const_lhs_binary_exp, BTOR_BV_SRL_NODE, e0, e1);
     ADD_RW_RULE (special_const_rhs_binary_exp, BTOR_BV_SRL_NODE, e0, e1);
     ADD_RW_RULE (const_srl, e0, e1);
+    //ADD_RW_RULE (zero_srl, e0, e1);
 
     assert (!result);
     if (!result)
@@ -7080,7 +7303,11 @@ btor_rewrite_slice_exp (Btor *btor,
   assert (btor);
   assert (btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 0);
 
-  return rewrite_slice_exp (btor, exp, upper, lower);
+  BtorNode *res;
+  double start = btor_util_time_stamp ();
+  res          = rewrite_slice_exp (btor, exp, upper, lower);
+  btor->time.rewrite += btor_util_time_stamp () - start;
+  return res;
 }
 
 BtorNode *
@@ -7096,6 +7323,7 @@ btor_rewrite_binary_exp (Btor *btor,
   assert (btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 0);
 
   BtorNode *result;
+  double start = btor_util_time_stamp ();
 
   switch (kind)
   {
@@ -7131,6 +7359,7 @@ btor_rewrite_binary_exp (Btor *btor,
       result = rewrite_lambda_exp (btor, e0, e1);
   }
 
+  btor->time.rewrite += btor_util_time_stamp () - start;
   return result;
 }
 
@@ -7147,5 +7376,9 @@ btor_rewrite_ternary_exp (
   assert (btor_opt_get (btor, BTOR_OPT_REWRITE_LEVEL) > 0);
   (void) kind;
 
-  return rewrite_cond_exp (btor, e0, e1, e2);
+  BtorNode *res;
+  double start = btor_util_time_stamp ();
+  res          = rewrite_cond_exp (btor, e0, e1, e2);
+  btor->time.rewrite += btor_util_time_stamp () - start;
+  return res;
 }

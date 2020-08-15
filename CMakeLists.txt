@@ -3,14 +3,14 @@ cmake_minimum_required(VERSION 3.3)
 #-----------------------------------------------------------------------------#
 
 project(boolector)
-set(VERSION "3.0.1-pre")
+set(VERSION "3.2.1")
 string(TIMESTAMP TIME)
 
 #-----------------------------------------------------------------------------#
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/deps/install")
+list(APPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/deps/install")
 
 #-----------------------------------------------------------------------------#
 
@@ -102,6 +102,7 @@ message(STATUS "BIN directory is '${CMAKE_BINARY_DIR}/bin'")
 #-----------------------------------------------------------------------------#
 
 option3vl(ASAN       "Compile with ASAN support")
+option3vl(UBSAN      "Compile with UBSan support")
 option3vl(CHECK      "Enable assertions even for optimized compilation")
 option3vl(GCOV       "Compile with coverage support")
 option3vl(GPROF      "Compile with profiling support")
@@ -110,16 +111,19 @@ option3vl(PYTHON     "Build Python API")
 option3vl(TIME_STATS "Compile with time statistics")
 
 option3vl(USE_CADICAL    "Use and link with CaDiCaL")
+option3vl(USE_CMS        "Use and link with CryptoMiniSat")
 option3vl(USE_LINGELING  "Use and link with Lingeling (default)")
 option3vl(USE_MINISAT    "Use and link with MiniSat")
 option3vl(USE_PICOSAT    "Use and link with PicoSAT")
 
 option(ONLY_CADICAL   "Only use CaDiCaL" OFF)
+option(ONLY_CMS       "Only use CryptoMiniSat" OFF)
 option(ONLY_LINGELING "Only use Lingeling" OFF)
 option(ONLY_MINISAT   "Only use MiniSat" OFF)
 option(ONLY_PICOSAT   "Only use PicoSAT" OFF)
 option(USE_PYTHON2    "Prefer Python 2.7" )
 option(USE_PYTHON3    "Prefer Python 3" )
+option(USE_GMP        "Use GMP for bit-vector implementation" OFF)
 
 #-----------------------------------------------------------------------------#
 
@@ -160,14 +164,20 @@ if(ASAN)
   set(BUILD_SHARED_LIBS ON)
 endif()
 
+if(UBSAN)
+  add_required_c_cxx_flag("-fsanitize=undefined")
+  set(BUILD_SHARED_LIBS ON)
+endif()
+
 if(NOT BUILD_SHARED_LIBS)
-  set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 endif()
 
 #-----------------------------------------------------------------------------#
 # Default values for 3-valued options
 
 set_option(USE_CADICAL ON)
+set_option(USE_CMS ON)
 set_option(USE_LINGELING ON)
 set_option(USE_MINISAT ON)
 set_option(USE_PICOSAT ON)
@@ -257,22 +267,32 @@ include(CheckNoExportDynamic)
 #-----------------------------------------------------------------------------#
 
 if(ONLY_CADICAL)
+  set(USE_CMS OFF)
   set(USE_LINGELING OFF)
   set(USE_MINISAT OFF)
   set(USE_PICOSAT OFF)
   set(USE_CADICAL ON)
+elseif(ONLY_CMS)
+  set(USE_CADICAL OFF)
+  set(USE_LINGELING OFF)
+  set(USE_MINISAT OFF)
+  set(USE_PICOSAT OFF)
+  set(USE_CMS ON)
 elseif(ONLY_LINGELING)
   set(USE_CADICAL OFF)
+  set(USE_CMS OFF)
   set(USE_MINISAT OFF)
   set(USE_PICOSAT OFF)
   set(USE_LINGELING ON)
 elseif(ONLY_MINISAT)
   set(USE_CADICAL OFF)
+  set(USE_CMS OFF)
   set(USE_LINGELING OFF)
   set(USE_PICOSAT OFF)
   set(USE_MINISAT ON)
 elseif(ONLY_PICOSAT)
   set(USE_CADICAL OFF)
+  set(USE_CMS OFF)
   set(USE_LINGELING OFF)
   set(USE_MINISAT OFF)
   set(USE_PICOSAT ON)
@@ -291,11 +311,21 @@ if(NOT IS_WINDOWS_BUILD)
   endif()
 endif()
 
+if(USE_GMP)
+  find_package(GMP)
+  if(GMP_FOUND)
+    add_definitions("-DBTOR_USE_GMP")
+  endif()
+endif()
+
 if(USE_LINGELING)
   find_package(Lingeling)
 endif()
 if(USE_CADICAL)
   find_package(CaDiCaL)
+endif()
+if(USE_CMS)
+  find_package(CryptoMiniSat)
 endif()
 if(USE_PICOSAT)
   find_package(PicoSAT)
@@ -306,13 +336,15 @@ endif()
 
 if(NOT USE_LINGELING
    AND NOT USE_CADICAL
+   AND NOT USE_CMS
    AND NOT USE_PICOSAT
    AND NOT USE_MINISAT)
   message(FATAL_ERROR "No SAT solver configured")
-elseif(NOT LINGELING_FOUND
-       AND NOT CADICAL_FOUND
-       AND NOT PICOSAT_FOUND
-       AND NOT MINISAT_FOUND)
+elseif(NOT Lingeling_FOUND
+       AND NOT CaDiCaL_FOUND
+       AND NOT CryptoMiniSat_FOUND
+       AND NOT PicoSAT_FOUND
+       AND NOT MiniSat_FOUND)
   message(FATAL_ERROR "No SAT solver found")
 endif()
 
@@ -322,8 +354,6 @@ if(Lingeling_FOUND)
   else()
     add_definitions("-DBTOR_USE_LINGELING")
   endif()
-elseif(GIVEN_Lingeling_ROOT_DIR)
-  message(FATAL_ERROR "Lingeling not found")
 endif()
 
 if(CaDiCaL_FOUND)
@@ -332,8 +362,14 @@ if(CaDiCaL_FOUND)
   else()
     add_definitions("-DBTOR_USE_CADICAL")
   endif()
-elseif(GIVEN_CaDiCaL_ROOT_DIR)
-  message(FATAL_ERROR "CaDiCaL not found")
+endif()
+
+if(CryptoMiniSat_FOUND)
+  if(NOT CryptoMiniSat_INCLUDE_DIR)
+    message(FATAL_ERROR "CryptoMiniSat headers not found")
+  else()
+    add_definitions("-DBTOR_USE_CMS")
+  endif()
 endif()
 
 if(PicoSAT_FOUND)
@@ -342,8 +378,6 @@ if(PicoSAT_FOUND)
   else()
     add_definitions("-DBTOR_USE_PICOSAT")
   endif()
-elseif(GIVEN_PicoSAT_ROOT_DIR)
-  message(FATAL_ERROR "PicoSAT not found")
 endif()
 
 if(MiniSat_FOUND)
@@ -352,8 +386,6 @@ if(MiniSat_FOUND)
   else()
     add_definitions("-DBTOR_USE_MINISAT")
   endif()
-elseif(GIVEN_MiniSat_ROOT_DIR)
-  message(FATAL_ERROR "MiniSAT not found")
 endif()
 
 #-----------------------------------------------------------------------------#
@@ -398,8 +430,20 @@ configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/btorconfig.h.in
   ${CMAKE_CURRENT_BINARY_DIR}/src/btorconfig.h)
 
-# Enable CTest
+#-----------------------------------------------------------------------------#
+# Regression tests
+
+# Get and configure google test
+include(cmake/googletest.cmake)
+fetch_googletest(
+    ${PROJECT_SOURCE_DIR}/cmake
+    ${PROJECT_BINARY_DIR}/googletest
+    )
+
 enable_testing()
+
+#-----------------------------------------------------------------------------#
+# Source directories
 
 include_directories(src ${CMAKE_CURRENT_BINARY_DIR}/src)
 add_subdirectory(src)
@@ -434,3 +478,43 @@ install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/BoolectorConfigVersion.cmake
   DESTINATION lib/cmake/Boolector
 )
+
+#-----------------------------------------------------------------------------#
+# Print Boolector configuration
+
+if(NOT WIN32)
+  string(ASCII 27 Esc)
+  set(Green "${Esc}[32m")
+  set(Blue "${Esc}[34m")
+  set(ResetColor "${Esc}[m")
+endif()
+
+macro(config_info msg value)
+  message(STATUS  "${Blue}${msg}: ${Green}${value}${ResetColor}")
+endmacro()
+
+macro(config_info_bool msg value)
+  if(${value})
+    config_info("${msg}" "yes")
+  else()
+    config_info("${msg}" "no")
+  endif()
+endmacro()
+
+config_info("Build type" "${CMAKE_BUILD_TYPE}")
+config_info_bool("Shared build" "${BUILD_SHARED_LIBS}")
+
+config_info_bool("ASAN support" ASAN)
+config_info_bool("UBSAN support" UBSAN)
+config_info_bool("Assertions enabled" CHECK)
+config_info_bool("gcov support" GCOV)
+config_info_bool("gprof support" GPROF)
+config_info_bool("Logging support" LOG)
+config_info_bool("Python bindings" PYTHON)
+config_info_bool("Time statistics" TIME_STATS)
+config_info_bool("CaDiCaL" USE_CADICAL)
+config_info_bool("CryptoMiniSat" USE_CMS)
+config_info_bool("Lingeling" USE_LINGELING)
+config_info_bool("MiniSat" USE_MINISAT)
+config_info_bool("PicoSAT" USE_PICOSAT)
+config_info_bool("GMP" USE_GMP)

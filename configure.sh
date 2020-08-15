@@ -6,23 +6,21 @@ BUILDDIR=build
 #--------------------------------------------------------------------------#
 
 asan=no
+ubsan=no
 debug=no
 check=no
 log=no
 shared=no
 prefix=
+path=
 
-btor2_dir=
+gmp=no
 
 lingeling=unknown
 minisat=unknown
 picosat=unknown
 cadical=unknown
-
-lingeling_dir=
-minisat_dir=
-picosat_dir=
-cadical_dir=
+cms=unknown
 
 gcov=no
 gprof=no
@@ -30,6 +28,8 @@ python=no
 py2=no
 py3=no
 timestats=no
+
+ninja=no
 
 flags=""
 
@@ -46,13 +46,18 @@ where <option> is one of the following:
   -g                compile with debugging support
   -f...|-m...       add compiler options
 
+  --ninja           use Ninja build system
   --prefix <dir>    install prefix
+
+  --path <dir>      look for dependencies in <dir>/{include,lib}
+                    specify multiple --path options for multiple directories
 
   --shared          shared library
 
   -l                compile with logging support (default for '-g')
   -c                check assertions even in optimized compilation
   --asan            compile with -fsanitize=address -fsanitize-recover=address
+  --ubsan           compile with -fsanitize=undefined
   --gcov            compile with -fprofile-arcs -ftest-coverage
   --gprof           compile with -pg
 
@@ -61,31 +66,23 @@ where <option> is one of the following:
   --py3             prefer Python 3
   --time-stats      compile with time statistics
 
-  --btor2tools-dir  the location of the btor2tools package (optional)
-                    default: <boolector_root_dir>/../btor2tools
+  --gmp             use gmp for bit-vector implementation
 
 By default all supported SAT solvers available are used and linked.
-If explicitly enabled, configuration will fail if the SAT solver library 
+If explicitly enabled, configuration will fail if the SAT solver library
 can not be found.
 
   --no-cadical           do not use CaDiCaL
+  --no-cms               do not use CryptoMiniSat
   --no-lingeling         do not use Lingeling
   --no-minisat           do not use MiniSAT
   --no-picosat           do not use PicoSAT
 
   --only-cadical         only use CaDiCaL
+  --only-cms             only use CryptoMiniSat
   --only-lingeling       only use Lingeling
   --only-minisat         only use MiniSAT
   --only-picosat         only use PicoSAT
-
-  --cadical-dir <dir>    CaDiCaL root directory (optional)
-                         default: <boolector_root_dir>/../cadical
-  --lingeling-dir <dir>  Lingeling root directory (optional)
-                         default: <boolector_root_dir>/../lingeling
-  --minisat-dir <dir>    MiniSat root directory (optional)
-                         default: <boolector_root_dir>/../minisat
-  --picosat-dir <dir>    PicoSAT root directory (optional)
-                         default: <boolector_root_dir>/../picosat
 EOF
   exit 0
 }
@@ -114,10 +111,19 @@ do
     -g) debug=yes;;
     -f*|-m*) if [ -z "$flags" ]; then flags=$1; else flags="$flags;$1"; fi;;
 
+    --ninja) ninja=yes;;
+
     --prefix)
       shift
       [ $# -eq 0 ] && die "missing argument to $opt"
       prefix=$1
+      ;;
+
+    --path)
+      shift
+      [ $# -eq 0 ] && die "missing argument to $opt"
+      [ -n "$path" ] && path="$path;"
+      path="$path$1"
       ;;
 
     --shared) shared=yes;;
@@ -125,6 +131,7 @@ do
     -l)      log=yes;;
     -c)      check=yes;;
     --asan)  asan=yes;;
+    --ubsan) ubsan=yes;;
     --gcov)  gcov=yes;;
     --gprof) gprof=yes;;
 
@@ -133,41 +140,19 @@ do
     --py3)        py3=yes;;
     --time-stats) timestats=yes;;
 
-    --btor2tools-dir)
-      shift
-      [ $# -eq 0 ] && die "missing argument to $opt"
-      btor2_dir=$1
-      ;;
+    --gmp) gmp=yes;;
+
     --no-cadical)   cadical=no;;
+    --no-cms)       cms=no;;
     --no-lingeling) lingeling=no;;
     --no-minisat)   minisat=no;;
     --no-picosat)   picosat=no;;
 
-    --only-cadical)   lingeling=no;minisat=no;picosat=no;cadical=yes;;
-    --only-lingeling) lingeling=yes;minisat=no;picosat=no;cadical=no;;
-    --only-minisat)   lingeling=no;minisat=yes;picosat=no;cadical=no;;
-    --only-picosat)   lingeling=no;minisat=no;picosat=yes;cadical=no;;
-
-    --cadical-dir)
-      shift
-      [ $# -eq 0 ] && die "missing argument to $opt"
-      cadical_dir=$1
-      ;;
-    --lingeling-dir)
-      shift
-      [ $# -eq 0 ] && die "missing argument to $opt"
-      lingeling_dir=$1
-      ;;
-    --minisat-dir)
-      shift
-      [ $# -eq 0 ] && die "missing argument to $opt"
-      minisat_dir=$1
-      ;;
-    --picosat-dir)
-      shift
-      [ $# -eq 0 ] && die "missing argument to $opt"
-      picosat_dir=$1
-      ;;
+    --only-cadical)   lingeling=no;minisat=no;picosat=no;cadical=yes;cms=no;;
+    --only-cms)       lingeling=no;minisat=no;picosat=no;cadical=no;cms=yes;;
+    --only-lingeling) lingeling=yes;minisat=no;picosat=no;cadical=no;cms=no;;
+    --only-minisat)   lingeling=no;minisat=yes;picosat=no;cadical=no;cms=no;;
+    --only-picosat)   lingeling=no;minisat=no;picosat=yes;cadical=no;cms=no;;
 
     -*) die "invalid option '$opt' (try '-h')";;
   esac
@@ -178,22 +163,28 @@ done
 
 cmake_opts="$CMAKE_OPTS"
 
+[ $ninja = yes ] && cmake_opts="$cmake_opts -G Ninja"
+
 [ $asan = yes ] && cmake_opts="$cmake_opts -DASAN=ON"
+[ $ubsan = yes ] && cmake_opts="$cmake_opts -DUBSAN=ON"
 [ $debug = yes ] && cmake_opts="$cmake_opts -DCMAKE_BUILD_TYPE=Debug"
 [ $check = yes ] && cmake_opts="$cmake_opts -DCHECK=ON"
 [ $log = yes ] && cmake_opts="$cmake_opts -DLOG=ON"
 [ $shared = yes ] && cmake_opts="$cmake_opts -DBUILD_SHARED_LIBS=ON"
 
 [ -n "$prefix" ] && cmake_opts="$cmake_opts -DCMAKE_INSTALL_PREFIX=$prefix"
+[ -n "$path" ] && cmake_opts="$cmake_opts -DCMAKE_PREFIX_PATH=$path"
 
-[ -n "$btor2_dir" ] && cmake_opts="$cmake_opts -DBtor2Tools_ROOT_DIR=$btor2_dir"
+[ $gmp = yes ] && cmake_opts="$cmake_opts -DUSE_GMP=ON"
 
 [ $cadical = yes ] && cmake_opts="$cmake_opts -DUSE_CADICAL=ON"
+[ $cms = yes ] && cmake_opts="$cmake_opts -DUSE_CMS=ON"
 [ $lingeling = yes ] && cmake_opts="$cmake_opts -DUSE_LINGELING=ON"
 [ $minisat = yes ] && cmake_opts="$cmake_opts -DUSE_MINISAT=ON"
 [ $picosat = yes ] && cmake_opts="$cmake_opts -DUSE_PICOSAT=ON"
 
 [ $cadical = no ] && cmake_opts="$cmake_opts -DUSE_CADICAL=OFF"
+[ $cms = no ] && cmake_opts="$cmake_opts -DUSE_CMS=OFF"
 [ $lingeling = no ] && cmake_opts="$cmake_opts -DUSE_LINGELING=OFF"
 [ $minisat = no ] && cmake_opts="$cmake_opts -DUSE_MINISAT=OFF"
 [ $picosat = no ] && cmake_opts="$cmake_opts -DUSE_PICOSAT=OFF"
@@ -207,11 +198,6 @@ cmake_opts="$CMAKE_OPTS"
 [ $timestats = yes ] && cmake_opts="$cmake_opts -DTIME_STATS=ON"
 
 [ -n "$flags" ] && cmake_opts="$cmake_opts -DFLAGS=$flags"
-
-[ -n "$cadical_dir" ] && cmake_opts="$cmake_opts -DCaDiCaL_ROOT_DIR=$cadical_dir"
-[ -n "$lingeling_dir" ] && cmake_opts="$cmake_opts -DLingeling_ROOT_DIR=$lingeling_dir"
-[ -n "$minisat_dir" ] && cmake_opts="$cmake_opts -DMiniSat_ROOT_DIR=$minisat_dir"
-[ -n "$picosat_dir" ] && cmake_opts="$cmake_opts -DPicoSAT_ROOT_DIR=$picosat_dir"
 
 mkdir -p $BUILDDIR
 cd $BUILDDIR || exit 1

@@ -7,7 +7,6 @@
  */
 
 #include "btorslvprop.h"
-#include "btorslvpropsls.h"
 
 #include "btorabort.h"
 #include "btorbv.h"
@@ -15,10 +14,13 @@
 #include "btorcore.h"
 #include "btordbg.h"
 #include "btorlog.h"
+#include "btorlsutils.h"
 #include "btormodel.h"
 #include "btornode.h"
 #include "btoropt.h"
 #include "btorprintmodel.h"
+#include "btorproputils.h"
+#include "btorslsutils.h"
 
 #include "utils/btorhashint.h"
 #include "utils/btorhashptr.h"
@@ -54,6 +56,7 @@ select_constraint (Btor *btor, uint32_t nmoves)
   BtorPtrHashTableIterator pit;
   BtorNode *root;
   btor_iter_hashptr_init (&pit, btor->unsynthesized_constraints);
+  btor_iter_hashptr_queue (&pit, btor->synthesized_constraints);
   btor_iter_hashptr_queue (&pit, btor->assumptions);
   while (btor_iter_hashptr_has_next (&pit))
   {
@@ -139,7 +142,7 @@ move (Btor *btor, uint32_t nmoves)
   do
   {
     slv->stats.props +=
-        btor_propsls_select_move_prop (btor, root, &input, &assignment);
+        btor_proputils_select_move_prop (btor, root, &input, &assignment);
   } while (!input);
 
 #ifndef NBTORLOG
@@ -163,7 +166,7 @@ move (Btor *btor, uint32_t nmoves)
   exps = btor_hashint_map_new (btor->mm);
   assert (btor_node_is_regular (input));
   btor_hashint_map_add (exps, input->id)->as_ptr = assignment;
-  btor_propsls_update_cone (
+  btor_lsutils_update_cone (
       btor,
       btor->bv_model,
       slv->roots,
@@ -253,6 +256,9 @@ sat_prop_solver_aux (Btor *btor)
     if (btor_hashptr_table_get (btor->unsynthesized_constraints,
                                 btor_node_invert (root)))
       goto UNSAT;
+    if (btor_hashptr_table_get (btor->synthesized_constraints,
+                                btor_node_invert (root)))
+      goto UNSAT;
     if (btor_hashptr_table_get (btor->assumptions, btor_node_invert (root)))
       goto UNSAT;
   }
@@ -262,8 +268,8 @@ sat_prop_solver_aux (Btor *btor)
     /* collect unsatisfied roots (kept up-to-date in update_cone) */
     assert (!slv->roots);
     slv->roots = btor_hashint_map_new (btor->mm);
-    assert (btor->synthesized_constraints->count == 0);
     btor_iter_hashptr_init (&it, btor->unsynthesized_constraints);
+    btor_iter_hashptr_queue (&it, btor->synthesized_constraints);
     btor_iter_hashptr_queue (&it, btor->assumptions);
     while (btor_iter_hashptr_has_next (&it))
     {
@@ -292,7 +298,7 @@ sat_prop_solver_aux (Btor *btor)
 
     /* compute initial sls score */
     if (btor_opt_get (btor, BTOR_OPT_PROP_USE_BANDIT))
-      btor_propsls_compute_sls_scores (
+      btor_slsutils_compute_sls_scores (
           btor, btor->bv_model, btor->fun_model, slv->score);
 
     /* init */
@@ -300,8 +306,8 @@ sat_prop_solver_aux (Btor *btor)
         btor_opt_get (btor, BTOR_OPT_PROP_PROB_FLIP_COND_CONST);
     slv->flip_cond_const_prob_delta =
         slv->flip_cond_const_prob > (BTOR_PROB_MAX / 2)
-            ? -BTOR_PROPSLS_PROB_FLIP_COND_CONST_DELTA
-            : BTOR_PROPSLS_PROB_FLIP_COND_CONST_DELTA;
+            ? -BTOR_PROPUTILS_PROB_FLIP_COND_CONST_DELTA
+            : BTOR_PROPUTILS_PROB_FLIP_COND_CONST_DELTA;
 
     /* move */
     for (j = 0, max_steps = BTOR_PROP_MAXSTEPS (slv->stats.restarts + 1);
@@ -376,7 +382,7 @@ sat_prop_solver (BtorPropSolver *slv)
   }
 
   BTOR_ABORT (btor->ufs->count != 0
-                  || (!btor_opt_get (btor, BTOR_OPT_BETA_REDUCE_ALL)
+                  || (!btor_opt_get (btor, BTOR_OPT_BETA_REDUCE)
                       && btor->lambdas->count != 0),
               "prop engine supports QF_BV only");
 

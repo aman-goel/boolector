@@ -26,6 +26,8 @@ bool btor_dbg_check_lambdas_static_rho_proxy_free (const Btor* btor);
 
 bool btor_dbg_check_unique_table_children_proxy_free (const Btor* btor);
 
+bool btor_dbg_check_unique_table_rebuild (const Btor* btor);
+
 bool btor_dbg_check_hash_table_proxy_free (BtorPtrHashTable* table);
 
 bool btor_dbg_check_all_hash_tables_proxy_free (const Btor* btor);
@@ -37,6 +39,12 @@ bool btor_dbg_check_all_hash_tables_simp_free (const Btor* btor);
 bool btor_dbg_check_constraints_not_const (const Btor* btor);
 
 bool btor_dbg_check_assumptions_simp_free (const Btor* btor);
+
+bool btor_dbg_check_constraints_simp_free (Btor* btor);
+
+bool btor_dbg_check_nodes_simp_free (Btor* btor,
+                                     BtorNode* nodes[],
+                                     size_t nnodes);
 
 /*------------------------------------------------------------------------*/
 /* exp                                                                    */

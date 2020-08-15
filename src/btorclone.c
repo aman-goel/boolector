@@ -1,6 +1,6 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
- *  Copyright (C) 2013-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2020 Aina Niemetz.
  *  Copyright (C) 2014-2018 Mathias Preiner.
  *  Copyright (C) 2014-2015 Armin Biere.
  *
@@ -304,9 +304,7 @@ clone_sorts_unique_table (Btor *btor, Btor *clone)
 	    cid = btor_sort_bool (clone);
 	    break;
 #endif
-      case BTOR_BITVEC_SORT:
-        cid = btor_sort_bv (clone, sort->bitvec.width);
-        break;
+      case BTOR_BV_SORT: cid = btor_sort_bv (clone, sort->bitvec.width); break;
 #if 0
 	  case BTOR_LST_SORT:
 	    cid = btor_sort_lst (clone, sort->lst.head->id, sort->lst.tail->id);
@@ -401,7 +399,7 @@ clone_sorts_unique_table (BtorMemMgr * mm,
 	    csort = btor_sort_bool (res);
 	    break;
 
-	  case BTOR_BITVEC_SORT:
+	  case BTOR_BV_SORT:
 	    csort = btor_sort_bv (res, sort->bitvec.len);
 	    break;
 
@@ -493,7 +491,8 @@ clone_exp (Btor *clone,
            BtorNodePtrStack *rhos,
            BtorNodePtrStack *static_rhos,
            BtorNodeMap *exp_map,
-           bool exp_layer_only)
+           bool exp_layer_only,
+           bool clone_simplified)
 {
   assert (clone);
   assert (exp);
@@ -539,8 +538,15 @@ clone_exp (Btor *clone,
   assert (!exp->next || !btor_node_is_invalid (exp->next));
   BTOR_PUSH_STACK_IF (exp->next, *nodes, &res->next);
 
-  assert (!exp->simplified || !btor_node_is_invalid (exp->simplified));
-  BTOR_PUSH_STACK_IF (exp->simplified, *nodes, &res->simplified);
+  assert (!btor_node_is_simplified (exp) || !btor_node_is_invalid (exp->simplified));
+  if (clone_simplified || btor_node_is_proxy (exp))
+  {
+    BTOR_PUSH_STACK_IF (exp->simplified, *nodes, &res->simplified);
+  }
+  else
+  {
+    res->simplified = 0;
+  }
 
   res->btor = clone;
 
@@ -663,7 +669,8 @@ clone_nodes_id_table (Btor *btor,
                       BtorNodePtrStack *res,
                       BtorNodeMap *exp_map,
                       bool exp_layer_only,
-                      BtorNodePtrStack *rhos)
+                      BtorNodePtrStack *rhos,
+                      bool clone_simplified)
 {
   assert (btor);
   assert (clone);
@@ -707,7 +714,8 @@ clone_nodes_id_table (Btor *btor,
                                        rhos,
                                        &static_rhos,
                                        exp_map,
-                                       exp_layer_only)
+                                       exp_layer_only,
+                                       clone_simplified)
                           : 0;
       assert (!exp || res->start[i]->id > 0);
       assert (!exp || (size_t) res->start[i]->id == i);
@@ -833,7 +841,7 @@ clone_nodes_unique_table (Btor *btor, Btor *clone, BtorNodeMap *exp_map)
     BTORLOG_TIMESTAMP (delta);                                           \
     clone->table = btor_hashptr_table_clone (                            \
         mm, btor->table, btor_clone_key_as_node, data_func, emap, emap); \
-    BTORLOG (1,                                                          \
+    BTORLOG (2,                                                          \
              "  clone " #table " table: %.3f s",                         \
              (btor_util_time_stamp () - delta));                         \
     CHKCLONE_MEM_PTR_HASH_TABLE (btor->table, clone->table);             \
@@ -845,21 +853,21 @@ clone_nodes_unique_table (Btor *btor, Btor *clone, BtorNodeMap *exp_map)
   {                                                                        \
     BTORLOG_TIMESTAMP (delta);                                             \
     clone->table = btor_hashint_map_clone (mm, btor->table, data_func, 0); \
-    BTORLOG (1,                                                            \
+    BTORLOG (2,                                                            \
              "  clone " #table " table: %.3f s",                           \
              (btor_util_time_stamp () - delta));                           \
     CHKCLONE_MEM_INT_HASH_MAP (btor->table, clone->table);                 \
   } while (0)
 #endif
 
-#define MEM_BITVEC(bv) \
-  ((bv) ? sizeof (*(bv)) + bv->len * sizeof (BTOR_BV_TYPE) : 0)
+#define MEM_BITVEC(bv) ((bv) ? btor_bv_size (bv) : 0)
 
 static Btor *
 clone_aux_btor (Btor *btor,
                 BtorNodeMap **exp_map,
                 bool exp_layer_only,
-                bool clone_slv)
+                bool clone_slv,
+                bool clone_simplified)
 {
   assert (btor);
   assert (exp_layer_only
@@ -889,7 +897,7 @@ clone_aux_btor (Btor *btor,
   BtorOption o;
 #endif
 
-  BTORLOG (1, "start cloning btor %p ...", btor);
+  BTORLOG (2, "start cloning btor %p ...", btor);
   start = btor_util_time_stamp ();
   btor->stats.clone_calls += 1;
 
@@ -900,6 +908,8 @@ clone_aux_btor (Btor *btor,
 #endif
   memcpy (clone, btor, sizeof (Btor));
   clone->mm = mm;
+  btor_rng_clone (&btor->rng, &clone->rng);
+
   BTOR_CLR (&clone->cbs);
   btor_opt_clone_opts (btor, clone);
 #ifndef NDEBUG
@@ -985,7 +995,7 @@ clone_aux_btor (Btor *btor,
     BTORLOG_TIMESTAMP (delta);
     clone->fun_assignments =
         btor_ass_clone_fun_list (clone->mm, btor->fun_assignments);
-    BTORLOG (1,
+    BTORLOG (2,
              "  clone array assignments: %.3f s",
              (btor_util_time_stamp () - delta));
 #ifndef NDEBUG
@@ -1016,28 +1026,44 @@ clone_aux_btor (Btor *btor,
     {
       BTORLOG_TIMESTAMP (delta);
       clone->avmgr = btor_aigvec_mgr_clone (clone, btor->avmgr);
-      BTORLOG (1, "  clone AIG mgr: %.3f s", (btor_util_time_stamp () - delta));
-      assert (
-          (allocated +=
-           sizeof (BtorAIGVecMgr) + sizeof (BtorAIGMgr) + sizeof (BtorSATMgr)
+      BTORLOG (2, "  clone AIG mgr: %.3f s", (btor_util_time_stamp () - delta));
+#ifndef NDEBUG
+      allocated +=
+          sizeof (BtorAIGVecMgr) + sizeof (BtorAIGMgr)
+          + sizeof (BtorSATMgr)
+          /* memory of AIG nodes */
+          + (amgr->cur_num_aigs + amgr->cur_num_aig_vars) * sizeof (BtorAIG)
+          /* children for AND AIGs */
+          + amgr->cur_num_aigs * sizeof (int32_t) * 2
+          /* unique table chain */
+          + amgr->table.size * sizeof (int32_t)
+          + BTOR_SIZE_STACK (amgr->id2aig) * sizeof (BtorAIG *)
+          + BTOR_SIZE_STACK (amgr->cnfid2aig) * sizeof (int32_t);
 #ifdef BTOR_USE_LINGELING
-           + (amgr->smgr->solver ? sizeof (BtorLGL) : 0)
+      assert (strcmp (amgr->smgr->name, "Lingeling") == 0
+              || strcmp (amgr->smgr->name, "DIMACS Printer") == 0);
+      assert (strcmp (amgr->smgr->name, "DIMACS Printer") != 0
+              || strcmp (((BtorCnfPrinter *) amgr->smgr->solver)->smgr->name,
+                         "Lingeling")
+                     == 0);
+      allocated += amgr->smgr->solver ? sizeof (BtorLGL) : 0;
+      if (strcmp (amgr->smgr->name, "DIMACS Printer") == 0)
+      {
+        BtorCnfPrinter *cnf_printer = ((BtorCnfPrinter *) amgr->smgr->solver);
+        allocated +=
+            sizeof (BtorCnfPrinter) + sizeof (BtorSATMgr)
+            + BTOR_SIZE_STACK (cnf_printer->clauses) * sizeof (int32_t)
+            + BTOR_SIZE_STACK (cnf_printer->assumptions) * sizeof (int32_t);
+      }
 #endif
-           /* memory of AIG nodes */
-           + (amgr->cur_num_aigs + amgr->cur_num_aig_vars) * sizeof (BtorAIG)
-           /* children for AND AIGs */
-           + amgr->cur_num_aigs * sizeof (int32_t) * 2
-           /* unique table chain */
-           + amgr->table.size * sizeof (int32_t)
-           + BTOR_SIZE_STACK (amgr->id2aig) * sizeof (BtorAIG *)
-           + BTOR_SIZE_STACK (amgr->cnfid2aig) * sizeof (int32_t))
-          == clone->mm->allocated);
+      assert (allocated == clone->mm->allocated);
+#endif
     }
   }
 
   BTORLOG_TIMESTAMP (delta);
   clone_sorts_unique_table (btor, clone);
-  BTORLOG (1,
+  BTORLOG (2,
            "  clone sorts unique table: %.3f s",
            (btor_util_time_stamp () - delta));
 #ifndef NDEBUG
@@ -1060,10 +1086,15 @@ clone_aux_btor (Btor *btor,
 
   BTOR_INIT_STACK (btor->mm, rhos);
   BTORLOG_TIMESTAMP (delta);
-  clone_nodes_id_table (
-      btor, clone, &clone->nodes_id_table, emap, exp_layer_only, &rhos);
+  clone_nodes_id_table (btor,
+                        clone,
+                        &clone->nodes_id_table,
+                        emap,
+                        exp_layer_only,
+                        &rhos,
+                        clone_simplified);
   BTORLOG (
-      1, "  clone nodes id table: %.3f s", (btor_util_time_stamp () - delta));
+      2, "  clone nodes id table: %.3f s", (btor_util_time_stamp () - delta));
 #ifndef NDEBUG
   for (i = 1; i < BTOR_COUNT_STACK (btor->nodes_id_table); i++)
   {
@@ -1094,7 +1125,7 @@ clone_aux_btor (Btor *btor,
 
   BTORLOG_TIMESTAMP (delta);
   clone_nodes_unique_table (btor, clone, emap);
-  BTORLOG (1,
+  BTORLOG (2,
            "  clone nodes unique table: %.3f s",
            (btor_util_time_stamp () - delta));
   assert ((allocated += btor->nodes_unique_table.size * sizeof (BtorNode *))
@@ -1168,16 +1199,13 @@ clone_aux_btor (Btor *btor,
   CLONE_PTR_HASH_TABLE (assumptions);
   assert ((allocated += MEM_PTR_HASH_TABLE (btor->assumptions))
           == clone->mm->allocated);
+  CLONE_PTR_HASH_TABLE (orig_assumptions);
+  assert ((allocated += MEM_PTR_HASH_TABLE (btor->orig_assumptions))
+          == clone->mm->allocated);
   btor_clone_node_ptr_stack (
       mm, &btor->failed_assumptions, &clone->failed_assumptions, emap, true);
   assert ((allocated +=
            BTOR_SIZE_STACK (btor->failed_assumptions) * sizeof (BtorNode *))
-          == clone->mm->allocated);
-  CLONE_PTR_HASH_TABLE (var_rhs);
-  assert ((allocated += MEM_PTR_HASH_TABLE (btor->var_rhs))
-          == clone->mm->allocated);
-  CLONE_PTR_HASH_TABLE (fun_rhs);
-  assert ((allocated += MEM_PTR_HASH_TABLE (btor->fun_rhs))
           == clone->mm->allocated);
 
   clone->assertions_cache =
@@ -1298,7 +1326,7 @@ clone_aux_btor (Btor *btor,
                                &clone->functions_with_model,
                                emap,
                                false);
-    BTORLOG (1,
+    BTORLOG (2,
              "  clone functions_with_model: %.3f s",
              btor_util_time_stamp () - delta);
     assert ((allocated +=
@@ -1308,7 +1336,7 @@ clone_aux_btor (Btor *btor,
 
   BTORLOG_TIMESTAMP (delta);
   btor_clone_node_ptr_stack (mm, &btor->outputs, &clone->outputs, emap, false);
-  BTORLOG (1, "  clone outputs: %.3f s", btor_util_time_stamp () - delta);
+  BTORLOG (2, "  clone outputs: %.3f s", btor_util_time_stamp () - delta);
   assert ((allocated += BTOR_SIZE_STACK (btor->outputs) * sizeof (BtorNode *))
           == clone->mm->allocated);
 
@@ -1320,7 +1348,7 @@ clone_aux_btor (Btor *btor,
                                 btor_clone_data_as_int_htable,
                                 emap,
                                 emap);
-  BTORLOG (1,
+  BTORLOG (2,
            "  clone parameterized table: %.3f s",
            (btor_util_time_stamp () - delta));
 #ifndef NDEBUG
@@ -1534,7 +1562,7 @@ clone_aux_btor (Btor *btor,
 #endif
 
   btor->time.cloning += btor_util_time_stamp () - start;
-  BTORLOG (1, "cloning total: %.3f s", btor->time.cloning);
+  BTORLOG (2, "cloning total: %.3f s", btor->time.cloning);
   return clone;
 }
 
@@ -1543,21 +1571,25 @@ btor_clone_btor (Btor *btor)
 {
   assert (btor);
   return clone_aux_btor (
-      btor, 0, !btor_sat_mgr_has_clone_support (btor_get_sat_mgr (btor)), true);
+      btor,
+      0,
+      !btor_sat_mgr_has_clone_support (btor_get_sat_mgr (btor)),
+      true,
+      true);
 }
 
 Btor *
-btor_clone_exp_layer (Btor *btor, BtorNodeMap **exp_map)
+btor_clone_exp_layer (Btor *btor, BtorNodeMap **exp_map, bool clone_simplified)
 {
   assert (btor);
-  return clone_aux_btor (btor, exp_map, true, true);
+  return clone_aux_btor (btor, exp_map, true, true, clone_simplified);
 }
 
 Btor *
 btor_clone_formula (Btor *btor)
 {
   assert (btor);
-  return clone_aux_btor (btor, 0, true, false);
+  return clone_aux_btor (btor, 0, true, false, true);
 }
 
 BtorSortId
@@ -1607,8 +1639,7 @@ btor_clone_recursively_rebuild_sort (Btor *btor, Btor *clone, BtorSortId sort)
           for (i = 0; i < s->tuple.num_elements; i++)
             BTOR_PUSH_STACK (sort_stack, s->tuple.elements[i]);
           break;
-        default:
-          assert (s->kind == BTOR_BOOL_SORT || s->kind == BTOR_BITVEC_SORT);
+        default: assert (s->kind == BTOR_BOOL_SORT || s->kind == BTOR_BV_SORT);
       }
     }
     else if (!d->as_int)
@@ -1643,7 +1674,7 @@ btor_clone_recursively_rebuild_sort (Btor *btor, Btor *clone, BtorSortId sort)
           break;
         case BTOR_BOOL_SORT: r = btor_sort_bool (clone); break;
         default:
-          assert (s->kind == BTOR_BITVEC_SORT);
+          assert (s->kind == BTOR_BV_SORT);
           r = btor_sort_bv (clone, s->bitvec.width);
       }
       assert (r);
@@ -1723,7 +1754,7 @@ btor_clone_recursively_rebuild_exp (Btor *btor,
       }
       switch (cur->kind)
       {
-        case BTOR_CONST_NODE:
+        case BTOR_BV_CONST_NODE:
           cur_clone = btor_exp_bv_const (clone, btor_node_bv_const_get_bits (cur));
           break;
         case BTOR_VAR_NODE:

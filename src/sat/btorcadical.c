@@ -21,7 +21,13 @@ static void *
 init (BtorSATMgr *smgr)
 {
   (void) smgr;
-  return ccadical_init ();
+  CCaDiCaL *slv = ccadical_init ();
+  if (smgr->inc_required
+      && btor_opt_get (smgr->btor, BTOR_OPT_SAT_ENGINE_CADICAL_FREEZE))
+  {
+    ccadical_set_option (slv, "checkfrozen", 1);
+  }
+  return slv;
 }
 
 static void
@@ -30,11 +36,10 @@ add (BtorSATMgr *smgr, int32_t lit)
   ccadical_add (smgr->solver, lit);
 }
 
-static int32_t
-sat (BtorSATMgr *smgr, int32_t limit)
+static void
+assume (BtorSATMgr *smgr, int32_t lit)
 {
-  (void) limit;
-  return ccadical_sat (smgr->solver);
+  ccadical_assume (smgr->solver, lit);
 }
 
 static int32_t
@@ -50,13 +55,6 @@ deref (BtorSATMgr *smgr, int32_t lit)
 }
 
 static void
-reset (BtorSATMgr *smgr)
-{
-  ccadical_reset (smgr->solver);
-  smgr->solver = 0;
-}
-
-static void
 enable_verbosity (BtorSATMgr *smgr, int32_t level)
 {
   if (level <= 1)
@@ -65,9 +63,53 @@ enable_verbosity (BtorSATMgr *smgr, int32_t level)
     ccadical_set_option (smgr->solver, "verbose", level - 2);
 }
 
+static int32_t
+failed (BtorSATMgr *smgr, int32_t lit)
+{
+  return ccadical_failed (smgr->solver, lit);
+}
+
+static void
+reset (BtorSATMgr *smgr)
+{
+  ccadical_reset (smgr->solver);
+  smgr->solver = 0;
+}
+
+static int32_t
+sat (BtorSATMgr *smgr, int32_t limit)
+{
+  (void) limit;
+  return ccadical_sat (smgr->solver);
+}
+
+static void
+setterm (BtorSATMgr *smgr)
+{
+  /* for CaDiCaL, state is the first argument (unlike, e.g., Lingeling) */
+  ccadical_set_terminate (smgr->solver, smgr->term.state, smgr->term.fun);
+}
+
 /*------------------------------------------------------------------------*/
 /* incremental API                                                        */
 /*------------------------------------------------------------------------*/
+
+static int32_t
+inc_max_var (BtorSATMgr *smgr)
+{
+  int32_t var = smgr->maxvar + 1;
+  if (smgr->inc_required)
+  {
+    ccadical_freeze (smgr->solver, var);
+  }
+  return var;
+}
+
+static void
+melt (BtorSATMgr *smgr, int32_t lit)
+{
+  if (smgr->inc_required) ccadical_melt (smgr->solver, lit);
+}
 
 /*------------------------------------------------------------------------*/
 
@@ -83,10 +125,10 @@ btor_sat_enable_cadical (BtorSATMgr *smgr)
 
   BTOR_CLR (&smgr->api);
   smgr->api.add              = add;
-  smgr->api.assume           = 0;
+  smgr->api.assume           = assume;
   smgr->api.deref            = deref;
   smgr->api.enable_verbosity = enable_verbosity;
-  smgr->api.failed           = 0;
+  smgr->api.failed           = failed;
   smgr->api.fixed            = 0;
   smgr->api.inc_max_var      = 0;
   smgr->api.init             = init;
@@ -97,8 +139,21 @@ btor_sat_enable_cadical (BtorSATMgr *smgr)
   smgr->api.set_output       = 0;
   smgr->api.set_prefix       = 0;
   smgr->api.stats            = 0;
+  smgr->api.setterm          = setterm;
+
+  if (btor_opt_get (smgr->btor, BTOR_OPT_SAT_ENGINE_CADICAL_FREEZE))
+  {
+    smgr->api.inc_max_var = inc_max_var;
+    smgr->api.melt        = melt;
+  }
+  else
+  {
+    smgr->have_restore = true;
+  }
+
   return true;
 }
+
 /*------------------------------------------------------------------------*/
 #endif
 /*------------------------------------------------------------------------*/

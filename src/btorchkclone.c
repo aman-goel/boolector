@@ -1,6 +1,6 @@
 /*  Boolector: Satisfiability Modulo Theories (SMT) solver.
  *
- *  Copyright (C) 2013-2018 Aina Niemetz.
+ *  Copyright (C) 2013-2019 Aina Niemetz.
  *  Copyright (C) 2013-2017 Mathias Preiner.
  *
  *  This file is part of Boolector.
@@ -508,15 +508,16 @@ btor_chkclone_exp (Btor *btor,
 
   if (btor_node_is_bv_const (real_exp))
   {
-    assert (btor_node_bv_const_get_bits (real_exp)->width
-            == btor_node_bv_const_get_bits (real_cexp)->width);
+    assert (btor_bv_get_width (btor_node_bv_const_get_bits (real_exp))
+            == btor_bv_get_width (btor_node_bv_const_get_bits (real_cexp)));
     assert (btor_bv_compare (btor_node_bv_const_get_bits (real_exp),
                              btor_node_bv_const_get_bits (real_cexp))
             == 0);
     if (btor_node_bv_const_get_invbits (real_exp))
     {
-      assert (btor_node_bv_const_get_invbits (real_exp)->width
-              == btor_node_bv_const_get_invbits (real_cexp)->width);
+      assert (
+          btor_bv_get_width (btor_node_bv_const_get_invbits (real_exp))
+          == btor_bv_get_width (btor_node_bv_const_get_invbits (real_cexp)));
       assert (btor_bv_compare (btor_node_bv_const_get_invbits (real_exp),
                                btor_node_bv_const_get_invbits (real_cexp))
               == 0);
@@ -868,8 +869,6 @@ chkclone_tables (Btor *btor, Btor *clone)
   chkclone_node_ptr_hash_table (
       btor->synthesized_constraints, clone->synthesized_constraints, 0);
   chkclone_node_ptr_hash_table (btor->assumptions, clone->assumptions, 0);
-  chkclone_node_ptr_hash_table (btor->var_rhs, clone->var_rhs, 0);
-  chkclone_node_ptr_hash_table (btor->fun_rhs, clone->fun_rhs, 0);
 
   if (!btor->parameterized)
     assert (!clone->parameterized);
@@ -975,7 +974,7 @@ btor_chkclone_sort (Btor *btor,
 
   switch (sort->kind)
   {
-    case BTOR_BITVEC_SORT:
+    case BTOR_BV_SORT:
       assert (sort->bitvec.width == csort->bitvec.width);
       break;
 

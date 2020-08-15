@@ -1,13 +1,10 @@
-trigger:
-- master
-
 variables:
   CCACHE_DIR: $(Pipeline.Workspace)/ccache
 
 jobs:
 - job: Linux
   pool:
-   vmImage: 'ubuntu-16.04'
+   vmImage: 'ubuntu-latest'
   strategy:
     matrix:
       production:
@@ -18,6 +15,9 @@ jobs:
         btorConfigEnv: 'CC=clang CXX=clang++'
       debug:
         btorConfig: '-g'
+        btorConfigEnv: ''
+      debug_gmp:
+        btorConfig: '-g --gmp'
         btorConfigEnv: ''
       python2:
         needCython: true
@@ -47,6 +47,7 @@ jobs:
       ./contrib/setup-btor2tools.sh
       ./contrib/setup-cadical.sh
       ./contrib/setup-lingeling.sh
+      ./contrib/setup-cms.sh
     displayName: 'Setup dependencies'
 
   - script: $(btorConfigEnv) ./configure.sh $(btorConfig)
@@ -62,7 +63,7 @@ jobs:
 
 - job: macOS
   pool:
-   vmImage: 'macos-10.13'
+   vmImage: 'macos-latest'
   strategy:
     matrix:
       production:
@@ -73,6 +74,9 @@ jobs:
         btorConfigEnv: 'CC=clang CXX=clang++'
       debug:
         btorConfig: '-g'
+        btorConfigEnv: ''
+      debug_gmp:
+        btorConfig: '-g --gmp'
         btorConfigEnv: ''
       python3:
         needCython: true
@@ -98,9 +102,11 @@ jobs:
     displayName: 'Install Cython'
 
   - script: |
+      brew remove boost
       ./contrib/setup-btor2tools.sh
       ./contrib/setup-cadical.sh
       ./contrib/setup-lingeling.sh
+      ./contrib/setup-cms.sh
     displayName: 'Setup dependencies'
 
   - script: $(btorConfigEnv) ./configure.sh $(btorConfig)

@@ -2,7 +2,7 @@
  *
  *  Copyright (C) 2013 Christian Reisenberger.
  *  Copyright (C) 2013-2019 Aina Niemetz.
- *  Copyright (C) 2013-2018 Mathias Preiner.
+ *  Copyright (C) 2013-2020 Mathias Preiner.
  *  Copyright (C) 2013-2016 Armin Biere.
  *
  *  This file is part of Boolector.
@@ -117,6 +117,9 @@ void boolector_print_value_smt2 (Btor *, BoolectorNode *, char *, FILE *);
 #define MIN_NADDOPLITS_INC 0
 #define MAX_NADDOPLITS_INC 3
 
+#define MIN_NBITS_ROTATE 0
+#define MAX_NBITS_ROTATE_FACT 5
+
 #define MIN_NOPS_INIT 0
 #define MAX_NOPS_INIT 50
 #define MIN_NOPS 20
@@ -184,7 +187,6 @@ void boolector_print_value_smt2 (Btor *, BoolectorNode *, char *, FILE *);
   "where <option> is one of the following:\n"                                  \
   "\n"                                                                         \
   "  -h, --help                  print this message and exit\n"                \
-  "  -ha                         print all options\n"                          \
   "\n"                                                                         \
   "  -v                          be extra verbose\n"                           \
   "  -q                          be extra quiet (stats only)\n"                \
@@ -215,15 +217,14 @@ void boolector_print_value_smt2 (Btor *, BoolectorNode *, char *, FILE *);
     }                                \
   } while (0)
 
-#define BTORMBT_LOG_STATUS(l, prefix)                                      \
-  BTORMBT_LOG (l,                                                          \
-               prefix " (%d): bool %" PRId64 ", bv %" PRId64               \
-                      ", array %" PRId64 ", fun %" PRId64 ", uf %" PRId64, \
-               g_btormbt->round.ops,                                       \
-               BTOR_COUNT_STACK (g_btormbt->bo->exps),                     \
-               BTOR_COUNT_STACK (g_btormbt->bv->exps),                     \
-               BTOR_COUNT_STACK (g_btormbt->arr->exps),                    \
-               BTOR_COUNT_STACK (g_btormbt->fun->exps),                    \
+#define BTORMBT_LOG_STATUS(l, prefix)                                        \
+  BTORMBT_LOG (l,                                                            \
+               prefix " (%d): bool %zu, bv %zu, array %zu, fun %zu, uf %zu", \
+               g_btormbt->round.ops,                                         \
+               BTOR_COUNT_STACK (g_btormbt->bo->exps),                       \
+               BTOR_COUNT_STACK (g_btormbt->bv->exps),                       \
+               BTOR_COUNT_STACK (g_btormbt->arr->exps),                      \
+               BTOR_COUNT_STACK (g_btormbt->fun->exps),                      \
                BTOR_COUNT_STACK (g_btormbt->uf->exps));
 
 /*------------------------------------------------------------------------*/
@@ -261,6 +262,8 @@ typedef enum BtorMBTOperator
   DEC,
   UEXT,
   SEXT,
+  ROLI,
+  RORI,
   /* boolean unary funs */
   REDOR,
   REDXOR,
@@ -317,7 +320,7 @@ typedef enum BtorMBTOperator
   BTORMBT_NUM_OPS
 } BtorMBTOperator;
 
-const char *const g_op2str[] = {
+const char *const g_op2str[BTORMBT_NUM_OPS] = {
     "param", "fun",     "uf",    "const", "zero",  "false", "ones",   "true",
     "one",   "uint",    "int",   "var",   "array", "not",   "neg",    "repeat",
     "slice", "inc",     "dec",   "uext",  "sext",  "redor", "redxor", "redand",
@@ -810,6 +813,11 @@ btormbt_new_btormbt (void)
   BTOR_CNEW (mm, mbt);
   mbt->mm = mm;
 
+  /* Pre-initialize with 0, seed is set per round. Initializing is mandatory
+   * to make sure it the GMP RNG is initialized correctly when copmiled
+   * with GMP. */
+  btor_rng_init (&mbt->round.rng, 0);
+
   BTOR_INIT_STACK (mm, mbt->btor_opts);
 
   /* retrieve all available boolector options */
@@ -967,6 +975,7 @@ btormbt_delete_btormbt (BtorMBT *mbt)
   BtorMBTBtorOpt *opt;
 
   mm = mbt->mm;
+  btor_rng_delete (&mbt->round.rng);
   while (!BTOR_EMPTY_STACK (mbt->btor_opts))
   {
     opt = BTOR_POP_STACK (mbt->btor_opts);
@@ -1627,11 +1636,15 @@ btormbt_unary_op (BtorMBT *mbt, BtorMBTOperator op, BoolectorNode *e)
 {
   assert (is_unary_op (op));
 
-  uint32_t upper, lower, repeat, width;
+  uint32_t upper, lower, repeat, nbits, width;
   BoolectorNode *node;
 
-  upper = lower = repeat = 0;
-  width                  = boolector_get_width (mbt->btor, e);
+  upper  = 0;
+  lower  = 0;
+  repeat = 0;
+  nbits  = 0;
+
+  width = boolector_get_width (mbt->btor, e);
   assert (width <= mbt->bw.max);
 
   if (op == SLICE)
@@ -1648,6 +1661,12 @@ btormbt_unary_op (BtorMBT *mbt, BtorMBTOperator op, BoolectorNode *e)
     repeat = btor_rng_pick_rand (
         &mbt->round.rng, 1, ((uint32_t) MAX_BITWIDTH / width));
   }
+  else if (op == ROLI || op == RORI)
+  {
+    nbits = btor_rng_pick_rand (&mbt->round.rng,
+                                MIN_NBITS_ROTATE,
+                                MAX_NBITS_ROTATE_FACT * MAX_BITWIDTH);
+  }
 
   node = 0;
   switch (op)
@@ -1660,6 +1679,8 @@ btormbt_unary_op (BtorMBT *mbt, BtorMBTOperator op, BoolectorNode *e)
     case DEC: node = boolector_dec (mbt->btor, e); break;
     case UEXT: node = boolector_uext (mbt->btor, e, upper); break;
     case SEXT: node = boolector_sext (mbt->btor, e, upper); break;
+    case ROLI: node = boolector_roli (mbt->btor, e, nbits); break;
+    case RORI: node = boolector_rori (mbt->btor, e, nbits); break;
     case REDOR: node = boolector_redor (mbt->btor, e); break;
     case REDXOR: node = boolector_redxor (mbt->btor, e); break;
     default: assert (op == REDAND); node = boolector_redand (mbt->btor, e);
@@ -1705,11 +1726,22 @@ btormbt_binary_op (BtorMBT *mbt,
   }
   else if (op >= SLL && op <= ROR)
   {
-    /* modify width of e0 power of 2 and e1 log2(e0) */
-    next_pow_of_2 (e0_width, &tmp0, &tmp1);
-    e0       = modify_bv (mbt, e0, tmp0);
-    e1       = modify_bv (mbt, e1, tmp1);
-    e0_width = tmp0;
+    if (btor_rng_pick_with_prob (&mbt->round.rng, 500))
+    {
+      /* use same bit-width */
+      if (e0_width != e1_width)
+      {
+        e1 = modify_bv (mbt, e1, e0_width);
+      }
+    }
+    else
+    {
+      /* modify width of e0 power of 2 and e1 log2(e0) */
+      next_pow_of_2 (e0_width, &tmp0, &tmp1);
+      e0       = modify_bv (mbt, e0, tmp0);
+      e1       = modify_bv (mbt, e1, tmp1);
+      e0_width = tmp0;
+    }
   }
   else if (op == CONCAT)
   {
@@ -2608,7 +2640,6 @@ btormbt_state_new (BtorMBT *mbt)
 static void *
 btormbt_state_opt (BtorMBT *mbt)
 {
-  bool inc = true;
   uint32_t i;
   BtorMBTBtorOpt *btoropt, *btoropt_engine;
   BtorUIntStack stack;
@@ -2726,28 +2757,20 @@ btormbt_state_opt (BtorMBT *mbt)
   {
     if (btoropt->val == BTOR_SAT_ENGINE_CADICAL)
       boolector_set_sat_solver (mbt->btor, "cadical");
+    if (btoropt->val == BTOR_SAT_ENGINE_CMS)
+      boolector_set_sat_solver (mbt->btor, "cms");
     else if (btoropt->val == BTOR_SAT_ENGINE_LINGELING)
       boolector_set_sat_solver (mbt->btor, "lingeling");
     else if (btoropt->val == BTOR_SAT_ENGINE_MINISAT)
       boolector_set_sat_solver (mbt->btor, "minisat");
+    else if (btoropt->val == BTOR_SAT_ENGINE_CMS)
+      boolector_set_sat_solver (mbt->btor, "cryptominisat");
     else
-    {
-      assert (btoropt->val == BTOR_SAT_ENGINE_PICOSAT);
       boolector_set_sat_solver (mbt->btor, "picosat");
-    }
   }
 
   BTORMBT_LOG (
       1, "opt: set boolector option '%s' to '%d'", btoropt->name, btoropt->val);
-
-  // currently, CaDiCaL only support non-incremental calls
-  if (boolector_get_opt (mbt->btor, BTOR_OPT_SAT_ENGINE)
-      == BTOR_SAT_ENGINE_CADICAL)
-  {
-    mbt->round.logic = BTORMBT_LOGIC_QF_BV;
-    BTORMBT_LOG (1, "opt: force logic to '%s'", "QF_BV");
-    inc = false;
-  }
 
   if (mbt->optfuzz)
   {
@@ -2839,6 +2862,13 @@ btormbt_state_opt (BtorMBT *mbt)
     {
       continue;
     }
+    else if ((btoropt->kind == BTOR_OPT_NONDESTR_SUBST
+              && boolector_get_opt (mbt->btor, BTOR_OPT_FUN_DUAL_PROP))
+             || (btoropt->kind == BTOR_OPT_FUN_DUAL_PROP
+                 && boolector_get_opt (mbt->btor, BTOR_OPT_NONDESTR_SUBST)))
+    {
+      continue;
+    }
 
     if (!btoropt->forced_by_cl)
     {
@@ -2850,19 +2880,14 @@ btormbt_state_opt (BtorMBT *mbt)
      * btoropt->val */
 
     /* set boolector option */
-    if (btoropt->kind != BTOR_OPT_INCREMENTAL || btoropt->val != 1 || inc)
-    {
-      boolector_set_opt (mbt->btor, btoropt->kind, btoropt->val);
-      BTORMBT_LOG (1,
-                   "opt: set boolector option '%s' to '%u'",
-                   btoropt->name,
-                   btoropt->val);
-    }
+    boolector_set_opt (mbt->btor, btoropt->kind, btoropt->val);
+    BTORMBT_LOG (1,
+                 "opt: set boolector option '%s' to '%u'",
+                 btoropt->name,
+                 btoropt->val);
 
     /* set some mbt specific options */
-    // NOTE: inc flag required since CaDiCaL does not yet support incremental
-    // mode
-    if (btoropt->kind == BTOR_OPT_INCREMENTAL && btoropt->val == 1 && inc)
+    if (btoropt->kind == BTOR_OPT_INCREMENTAL && btoropt->val == 1)
     {
       mbt->round.inc = true;
       mbt->round.max_ninc =
@@ -3451,9 +3476,11 @@ btormbt_state_dump (BtorMBT *mbt)
     boolector_set_opt (tmpbtor, BTOR_OPT_PARSE_INTERACTIVE, 0);
     if (btor_rng_pick_with_prob (&mbt->round.rng, 500))
     {
+      bool parsed_smt2;
       pres = boolector_parse (
-          tmpbtor, outfile, outfilename, stdout, &emsg, &pstat);
+          tmpbtor, outfile, outfilename, stdout, &emsg, &pstat, &parsed_smt2);
       (void) pres;
+      (void) parsed_smt2;
       if (emsg) fprintf (stderr, "error while parsing dumped file: %s\n", emsg);
       assert (pres != BOOLECTOR_PARSE_ERROR);
     }
@@ -3833,6 +3860,7 @@ reset_round_data (BtorMBT *mbt)
   assert (!mbt->bv_sorts);
   assert (!mbt->fun_sorts);
 
+  btor_rng_delete (&mbt->round.rng);
   memset (&mbt->round, 0, sizeof (mbt->round));
 
   mbt->assumptions = btormbt_new_exp_stack (mbt->mm);
@@ -4031,7 +4059,8 @@ main (int32_t argc, char **argv)
       if (tmp[0] != 0) btormbt_error ("invalid argument to '-b' (try '-h')");
       btoropt->val = val;
 #if !defined(BTOR_USE_LINGELING) && !defined(BTOR_USE_PICOSAT) \
-    && !defined(BTOR_USE_MINISAT)
+    && !defined(BTOR_USE_MINISAT) && !defined(BTOR_USE_CMS)    \
+    && !defined(BTOR_USE_CADICAL)
       if (btoropt->kind == BTOR_OPT_INCREMENTAL)
       {
         btormbt_error ("no SAT solver with incremental support compiled in");

@@ -442,7 +442,7 @@ btor_model_get_fun_aux (Btor *btor,
    * search (engines PROP, AIGPROP, SLS), assignment queries may be issued
    * when the current model is non satisfying (all intermediate models during
    * local search are non-satisfying). */
-  exp = btor_pointer_chase_simplified_exp (btor, exp);
+  exp = btor_node_get_simplified (btor, exp);
 
   assert (btor_node_is_fun (exp));
   d = btor_hashint_map_get (fun_model, exp->id);
@@ -478,6 +478,9 @@ compute_model_values (Btor *btor,
   size_t i;
   BtorNode *cur;
   BtorBitVector *bv;
+
+  if (num_nodes == 0)
+    return;
 
   qsort (
       nodes, num_nodes, sizeof (BtorNode *), btor_node_compare_by_id_qsort_asc);
@@ -580,7 +583,7 @@ btor_model_get_bv_aux (Btor *btor,
    * search (engines PROP, AIGPROP, SLS), assignment queries may be issued
    * when the current model is non satisfying (all intermediate models during
    * local search are non-satisfying). */
-  exp = btor_pointer_chase_simplified_exp (btor, exp);
+  exp = btor_node_get_simplified (btor, exp);
 
   /* Check if we already generated the assignment of exp
    * -> inverted if exp is inverted */
@@ -720,7 +723,7 @@ get_apply_value (Btor *btor,
   uint32_t i;
   BtorArgsIterator it;
   BtorBitVectorTuple *t;
-  BtorNode *arg, *real_arg;
+  BtorNode *arg, *real_arg, *tmp;
   BtorHashTableData *d;
   BtorBitVector *bv, *bv_inv, *result;
   BtorMemMgr *mm;
@@ -737,9 +740,12 @@ get_apply_value (Btor *btor,
 
     if (btor_node_is_param (real_arg))
     {
-      real_arg = btor_node_param_get_assigned_exp (real_arg);
+      tmp      = btor_node_param_get_assigned_exp (real_arg);
+      arg      = btor_node_cond_invert (arg, tmp);
+      real_arg = btor_node_real_addr (arg);
       assert (real_arg);
     }
+    assert (btor_node_is_regular (real_arg));
     if (real_arg->parameterized)
       d = btor_hashint_map_get (bv_param_model, real_arg->id);
     else
@@ -823,7 +829,8 @@ btor_model_recursively_compute_assignment (Btor *btor,
     cur_parent = BTOR_POP_STACK (work_stack);
     cur        = BTOR_POP_STACK (work_stack);
     real_cur   = btor_node_real_addr (cur);
-    assert (!real_cur->simplified);
+    // TODO(ma): check if this is an issue for nondestructive subst
+    // assert (!btor_node_is_simplified (real_cur));
 
     if (btor_hashint_map_contains (bv_model, real_cur->id)
         || btor_hashint_map_contains (param_model_cache, real_cur->id))
@@ -858,7 +865,8 @@ btor_model_recursively_compute_assignment (Btor *btor,
        * it doesn't have one) */
       if (btor_node_is_bv_var (real_cur) || btor_node_is_fun_eq (real_cur))
       {
-        result = btor_bv_get_assignment (mm, real_cur);
+        result = btor_bv_get_assignment (
+            mm, btor_node_get_simplified (btor, real_cur));
         goto CACHE_AND_PUSH_RESULT;
       }
       else if (btor_node_is_bv_const (real_cur))
@@ -1072,7 +1080,8 @@ btor_model_recursively_compute_assignment (Btor *btor,
 
         case BTOR_UF_NODE:
           assert (btor_node_is_apply (cur_parent));
-          result = btor_bv_get_assignment (mm, cur_parent);
+          result = btor_bv_get_assignment (
+              mm, btor_node_get_simplified (btor, cur_parent));
           break;
 
         case BTOR_UPDATE_NODE:
@@ -1216,7 +1225,7 @@ collect_nodes (Btor *btor,
     if (btor_hashint_table_contains (cache, cur->id)) continue;
 
     if (!cur->parameterized && !btor_node_is_args (cur))
-      BTOR_PUSH_STACK (*nodes, cur);
+      BTOR_PUSH_STACK (*nodes, btor_node_copy (btor, cur));
     btor_hashint_table_add (cache, cur->id);
     for (i = 0; i < cur->arity; i++) BTOR_PUSH_STACK (visit, cur->e[i]);
   }
@@ -1252,22 +1261,23 @@ btor_model_generate (Btor *btor,
       if (!cur || btor_node_is_args (cur) || btor_node_is_proxy (cur)
           || cur->parameterized)
         continue;
-      BTOR_PUSH_STACK (nodes, cur);
+      assert (!btor_node_is_simplified (cur)
+              || btor_opt_get (btor, BTOR_OPT_NONDESTR_SUBST));
+      BTOR_PUSH_STACK (
+          nodes, btor_node_copy (btor, btor_node_get_simplified (btor, cur)));
     }
   }
   else /* push nodes reachable from roots only */
   {
     BTOR_INIT_STACK (btor->mm, roots);
-    /* NOTE: adding fun_rhs is only needed for extensional benchmarks */
-    btor_iter_hashptr_init (&it, btor->fun_rhs);
-    btor_iter_hashptr_queue (&it, btor->var_rhs);
-    btor_iter_hashptr_queue (&it, btor->unsynthesized_constraints);
+    btor_iter_hashptr_init (&it, btor->unsynthesized_constraints);
     btor_iter_hashptr_queue (&it, btor->synthesized_constraints);
     btor_iter_hashptr_queue (&it, btor->assumptions);
+    btor_iter_hashptr_queue (&it, btor->inputs);
     while (btor_iter_hashptr_has_next (&it))
     {
       cur = btor_iter_hashptr_next (&it);
-      cur = btor_pointer_chase_simplified_exp (btor, cur);
+      cur = btor_node_get_simplified (btor, cur);
       BTOR_PUSH_STACK (roots, cur);
     }
     collect_nodes (btor, roots.start, BTOR_COUNT_STACK (roots), &nodes);
@@ -1277,6 +1287,8 @@ btor_model_generate (Btor *btor,
   compute_model_values (
       btor, bv_model, fun_model, nodes.start, BTOR_COUNT_STACK (nodes));
 
+  while (!BTOR_EMPTY_STACK (nodes))
+    btor_node_release (btor, BTOR_POP_STACK (nodes));
   BTOR_RELEASE_STACK (nodes);
 
   btor->time.model_gen += btor_util_time_stamp () - start;

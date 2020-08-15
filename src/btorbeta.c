@@ -206,8 +206,6 @@ beta_reduce (Btor *btor,
   BTOR_INIT_STACK (mm, reset);
   mark = btor_hashint_map_new (mm);
 
-  real_cur = btor_node_real_addr (exp);
-
   BTOR_PUSH_STACK (stack, exp);
   BTOR_PUSH_STACK (stack, 0);
 
@@ -215,18 +213,24 @@ beta_reduce (Btor *btor,
   {
     cur_parent = BTOR_POP_STACK (stack);
     cur        = BTOR_POP_STACK (stack);
+    assert (!btor_node_is_proxy (cur));
+
     /* we do not want the simplification of top level apply constraints */
     if (btor_node_real_addr (cur)->constraint && btor_node_is_apply (cur))
-      cur = btor_pointer_chase_simplified_exp (btor, cur);
+      cur = btor_node_get_simplified (btor, cur);
     else
       cur = btor_simplify_exp (btor, cur);
     real_cur = btor_node_real_addr (cur);
 
     d = btor_hashint_map_get (mark, real_cur->id);
 
+    BTORLOG (1, "  visit: %s", btor_util_node2string (cur));
+
     if (!d)
     {
-      assert (!btor_node_is_lambda (real_cur) || !real_cur->e[0]->simplified);
+      assert (!btor_node_is_lambda (real_cur)
+              || !btor_node_is_simplified (real_cur->e[0])
+              || btor_opt_get (btor, BTOR_OPT_NONDESTR_SUBST));
 
       if (btor_node_is_lambda (real_cur)
           && !real_cur->parameterized
@@ -259,7 +263,8 @@ beta_reduce (Btor *btor,
         continue;
       }
       /* stop at nodes that do not need to be rebuilt */
-      else if (!real_cur->lambda_below && !real_cur->parameterized)
+      else if ((!real_cur->lambda_below && !real_cur->parameterized)
+               || btor_node_is_update (real_cur))
       {
         BTOR_PUSH_STACK (arg_stack, btor_node_copy (btor, cur));
         continue;
@@ -342,6 +347,11 @@ beta_reduce (Btor *btor,
 
       arg_stack.top -= real_cur->arity;
       e = arg_stack.top; /* arguments in reverse order */
+
+#ifndef NDEBUG
+      for (i = 0; i < real_cur->arity; i++)
+        assert (!btor_node_is_simplified (e[i]));
+#endif
 
       switch (real_cur->kind)
       {
@@ -487,6 +497,7 @@ beta_reduce (Btor *btor,
           btor_node_release (btor, e[1]);
           btor_node_release (btor, e[2]);
       }
+      assert (!btor_node_is_simplified (result));
 
       d->as_ptr = btor_node_copy (btor, result);
       if (real_cur->parameterized || btor_node_is_lambda (real_cur))
@@ -518,6 +529,7 @@ beta_reduce (Btor *btor,
     BETA_REDUCE_PUSH_RESULT:
       if (btor_node_is_inverted (cur)) result = btor_node_invert (result);
 
+      assert (!btor_node_is_simplified (result));
       BTOR_PUSH_STACK (arg_stack, result);
     }
     else

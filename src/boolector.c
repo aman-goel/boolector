@@ -2,8 +2,8 @@
  *
  *  Copyright (C) 2007-2009 Robert Daniel Brummayer.
  *  Copyright (C) 2007-2016 Armin Biere.
- *  Copyright (C) 2012-2018 Mathias Preiner.
- *  Copyright (C) 2013-2019 Aina Niemetz.
+ *  Copyright (C) 2012-2020 Mathias Preiner.
+ *  Copyright (C) 2013-2020 Aina Niemetz.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -12,6 +12,7 @@
 /*------------------------------------------------------------------------*/
 
 #include "boolector.h"
+
 #include "btorabort.h"
 #include "btorchkclone.h"
 #include "btorclone.h"
@@ -27,6 +28,7 @@
 #include "dumper/btordumpaig.h"
 #include "dumper/btordumpbtor.h"
 #include "dumper/btordumpsmt.h"
+#include "preprocess/btorpreprocess.h"
 #include "utils/btorhashptr.h"
 #include "utils/btorutil.h"
 
@@ -75,106 +77,6 @@ dec_sort_ext_ref_counter (Btor *btor, BtorSortId id)
   assert (sort->ext_refs > 0);
   sort->ext_refs -= 1;
   btor->external_refs -= 1;
-}
-
-/*------------------------------------------------------------------------*/
-
-static BtorNode *
-translate_shift (Btor *btor,
-                 BtorNode *a0,
-                 BtorNode *a1,
-                 BtorNode *(*f) (Btor *, BtorNode *, BtorNode *) )
-{
-  BtorNode *c, *e, *t, *e0, *u, *l, *tmp, *res;
-  BtorSortId s;
-  uint32_t width, l0, l1, p0, p1;
-
-  width = btor_node_bv_get_width (btor, a0);
-
-  assert (width == btor_node_bv_get_width (btor, a1));
-
-  l1 = 0;
-  for (l0 = 1; l0 < width; l0 *= 2) l1++;
-
-  assert (l0 == (1u << l1));
-
-  if (width == 1)
-  {
-    assert (l0 == 1);
-    assert (l1 == 0);
-
-    if (f != btor_exp_bv_sra)
-    {
-      tmp = btor_exp_bv_not (btor, a1);
-      res = btor_exp_bv_and (btor, a0, tmp);
-      btor_node_release (btor, tmp);
-    }
-    else
-      res = btor_node_copy (btor, a0);
-  }
-  else
-  {
-    assert (width >= 1);
-    assert (width <= l0);
-
-    p0 = l0 - width;
-    p1 = width - l1;
-
-    assert (p1 > 0);
-
-    u = btor_exp_bv_slice (btor, a1, width - 1, width - p1);
-    l = btor_exp_bv_slice (btor, a1, l1 - 1, 0);
-
-    assert (btor_node_bv_get_width (btor, u) == p1);
-    assert (btor_node_bv_get_width (btor, l) == l1);
-
-    if (p1 > 1)
-      c = btor_exp_bv_redor (btor, u);
-    else
-      c = btor_node_copy (btor, u);
-
-    btor_node_release (btor, u);
-
-    if (f == btor_exp_bv_sra)
-    {
-      tmp = btor_exp_bv_slice (btor, a0, width - 1, width - 1);
-      t   = btor_exp_bv_sext (btor, tmp, width - 1);
-      btor_node_release (btor, tmp);
-    }
-    else
-    {
-      s = btor_sort_bv (btor, width);
-      t = btor_exp_bv_zero (btor, s);
-      btor_sort_release (btor, s);
-    }
-
-    if (!p0)
-      e0 = btor_node_copy (btor, a0);
-    else if (f == btor_exp_bv_sra)
-      e0 = btor_exp_bv_sext (btor, a0, p0);
-    else
-      e0 = btor_exp_bv_uext (btor, a0, p0);
-
-    assert (btor_node_bv_get_width (btor, e0) == l0);
-
-    e = f (btor, e0, l);
-    btor_node_release (btor, e0);
-    btor_node_release (btor, l);
-
-    if (p0 > 0)
-    {
-      tmp = btor_exp_bv_slice (btor, e, width - 1, 0);
-      btor_node_release (btor, e);
-      e = tmp;
-    }
-
-    res = btor_exp_cond (btor, c, t, e);
-
-    btor_node_release (btor, c);
-    btor_node_release (btor, t);
-    btor_node_release (btor, e);
-  }
-  return res;
 }
 
 /*------------------------------------------------------------------------*/
@@ -314,6 +216,25 @@ boolector_print_value_smt2 (Btor *btor,
 #ifndef NDEBUG
   BTOR_CHKCLONE_NORES (
       print_value_smt2, BTOR_CLONED_EXP (exp), symbol_str, file);
+#endif
+}
+
+void
+boolector_var_mark_bool (Btor *btor, BoolectorNode *node)
+{
+  BtorNode *exp;
+
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (node);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_TRAPI_UNFUN (exp);
+  BTOR_ABORT_ARG_NULL (node);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+
+  BtorPtrHashBucket *b = btor_hashptr_table_get (btor->inputs, exp);
+  assert (b);
+  b->data.flag = true;
+#ifndef NDEBUG
+  BTOR_CHKCLONE_NORES (var_mark_bool, BTOR_CLONED_EXP (exp));
 #endif
 }
 
@@ -595,8 +516,9 @@ boolector_assume (Btor *btor, BoolectorNode *node)
               "'exp' must have bit-width one");
   BTOR_ABORT (btor_node_real_addr (exp)->parameterized,
               "assumption must not be parameterized");
-  BTOR_PUSH_STACK (btor->failed_assumptions, btor_node_copy (btor, exp));
+
   btor_assume_exp (btor, exp);
+  BTOR_PUSH_STACK (btor->failed_assumptions, btor_node_copy (btor, exp));
 #ifndef NDEBUG
   BTOR_CHKCLONE_NORES (assume, BTOR_CLONED_EXP (exp));
 #endif
@@ -648,8 +570,7 @@ boolector_get_failed_assumptions (Btor *btor)
   {
     fass = BTOR_PEEK_STACK (btor->failed_assumptions, i);
     if (!fass) continue;
-    assert (btor_hashptr_table_get (
-        btor->assumptions, btor_pointer_chase_simplified_exp (btor, fass)));
+    assert (btor_hashptr_table_get (btor->orig_assumptions, fass));
     if (btor_failed_exp (btor, fass))
       BTOR_PUSH_STACK (failed, fass);
     else
@@ -765,7 +686,8 @@ boolector_simplify (Btor *btor)
 void
 boolector_set_sat_solver (Btor *btor, const char *solver)
 {
-  uint32_t sat_engine;
+  BtorPtrHashBucket *b;
+  uint32_t sat_engine, oldval;
 
   BTOR_ABORT_ARG_NULL (btor);
   BTOR_TRAPI ("%s", solver);
@@ -775,70 +697,40 @@ boolector_set_sat_solver (Btor *btor, const char *solver)
       "setting the SAT solver must be done before calling 'boolector_sat'");
 
   sat_engine = BTOR_SAT_ENGINE_DFLT;
+  oldval     = btor_opt_get (btor, BTOR_OPT_SAT_ENGINE);
 
-  if (!strcasecmp (solver, "lingeling"))
-    sat_engine = BTOR_SAT_ENGINE_LINGELING;
-  else if (!strcasecmp (solver, "picosat"))
-    sat_engine = BTOR_SAT_ENGINE_PICOSAT;
-  else if (!strcasecmp (solver, "minisat"))
-    sat_engine = BTOR_SAT_ENGINE_MINISAT;
-  else if (!strcasecmp (solver, "cadical"))
-    sat_engine = BTOR_SAT_ENGINE_CADICAL;
+  if ((b = btor_hashptr_table_get (btor->options[BTOR_OPT_SAT_ENGINE].options,
+                                   solver)))
+  {
+    sat_engine = ((BtorOptHelp *) b->data.as_ptr)->val;
+  }
   else
     BTOR_ABORT (1, "invalid sat engine '%s' selected", solver);
 
-#if !defined(BTOR_USE_LINGELING) || !defined(BTOR_USE_CADICAL) \
-    || !defined(BTOR_USE_MINISAT) || !defined(BTOR_USE_PICOSAT)
-  uint32_t oldval = btor_opt_get (btor, BTOR_OPT_SAT_ENGINE);
-#endif
+  if (false
 #ifndef BTOR_USE_LINGELING
-  if (sat_engine == BTOR_SAT_ENGINE_LINGELING)
-  {
-    BTOR_WARN (
-        true,
-        "SAT solver Lingeling not compiled in, using %s",
-        oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "CaDiCaL"
-            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
-    sat_engine = oldval;
-  }
+      || sat_engine == BTOR_SAT_ENGINE_LINGELING
 #endif
 #ifndef BTOR_USE_CADICAL
-  if (sat_engine == BTOR_SAT_ENGINE_CADICAL)
-  {
-    BTOR_WARN (
-        true,
-        "SAT solver CaDiCaL not compiled in, using %s",
-        oldval == BTOR_SAT_ENGINE_LINGELING
-            ? "Lingeling"
-            : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
-    sat_engine = oldval;
-  }
+      || sat_engine == BTOR_SAT_ENGINE_CADICAL
 #endif
 #ifndef BTOR_USE_MINISAT
-  if (sat_engine == BTOR_SAT_ENGINE_MINISAT)
-  {
-    BTOR_WARN (
-        sat_engine == BTOR_SAT_ENGINE_MINISAT,
-        "SAT solver Minisat not compiled in, using %s",
-        oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "CaDiCaL"
-            : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling" : "PicoSAT"));
-    sat_engine = oldval;
-  }
+      || sat_engine == BTOR_SAT_ENGINE_MINISAT
 #endif
 #ifndef BTOR_USE_PICOSAT
-  if (sat_engine == BTOR_SAT_ENGINE_PICOSAT)
+      || sat_engine == BTOR_SAT_ENGINE_PICOSAT
+#endif
+#ifndef BTOR_USE_CMS
+      || sat_engine == BTOR_SAT_ENGINE_CMS
+#endif
+  )
   {
-    BTOR_WARN (
-        sat_engine == BTOR_SAT_ENGINE_PICOSAT,
-        "SAT solver PicoSAT not compiled in, using %s",
-        oldval == BTOR_SAT_ENGINE_CADICAL
-            ? "CaDiCaL"
-            : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling" : "MiniSat"));
+    BTOR_WARN (true,
+               "SAT solver %s not compiled in, using %s",
+               g_btor_se_name[sat_engine],
+               g_btor_se_name[oldval]);
     sat_engine = oldval;
   }
-#endif
 
   btor_opt_set (btor, BTOR_OPT_SAT_ENGINE, sat_engine);
 #ifndef NDEBUG
@@ -852,7 +744,7 @@ void
 boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
 {
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s %u", btor_opt_get_lng (btor, opt), val);
+  BTOR_TRAPI ("%u %s %u", opt, btor_opt_get_lng (btor, opt), val);
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   BTOR_ABORT (
       val < btor_opt_get_min (btor, opt) || val > btor_opt_get_max (btor, opt),
@@ -871,12 +763,6 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
                   "incremental solving cannot be enabled "
                   "if unconstrained optimization is enabled");
     }
-    else if (opt == BTOR_OPT_MODEL_GEN)
-    {
-      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_UCOPT),
-                  "model generation cannot be enabled "
-                  "if unconstrained optimization is enabled");
-    }
     else if (opt == BTOR_OPT_UCOPT)
     {
       BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
@@ -888,79 +774,54 @@ boolector_set_opt (Btor *btor, BtorOption opt, uint32_t val)
     }
     else if (opt == BTOR_OPT_FUN_DUAL_PROP)
     {
-      BTOR_ABORT (val && btor_opt_get (btor, BTOR_OPT_FUN_JUST),
+      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_FUN_JUST),
                   "enabling multiple optimization techniques is not allowed");
+      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_NONDESTR_SUBST),
+                  "Non-destructive substitution is not supported with dual "
+                  "propagation");
     }
     else if (opt == BTOR_OPT_FUN_JUST)
     {
-      BTOR_ABORT (val && btor_opt_get (btor, BTOR_OPT_FUN_DUAL_PROP),
+      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_FUN_DUAL_PROP),
                   "enabling multiple optimization techniques is not allowed");
     }
-    else if (opt == BTOR_OPT_UCOPT)
+    else if (opt == BTOR_OPT_NONDESTR_SUBST)
     {
-      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_MODEL_GEN),
-                  "Unconstrained optimization cannot be enabled "
-                  "if model generation is enabled");
+      BTOR_ABORT (btor_opt_get (btor, BTOR_OPT_FUN_DUAL_PROP),
+                  "Non-destructive substitution is not supported with dual "
+                  "propagation");
     }
   }
 
-#if !defined(BTOR_USE_LINGELING) || !defined(BTOR_USE_CADICAL) \
-    || !defined(BTOR_USE_MINISAT) || !defined(BTOR_USE_PICOSAT)
   uint32_t oldval = btor_opt_get (btor, opt);
-#endif
 
   if (opt == BTOR_OPT_SAT_ENGINE)
   {
+    if (false
 #ifndef BTOR_USE_LINGELING
-    if (val == BTOR_SAT_ENGINE_LINGELING)
-    {
-      BTOR_WARN (
-          true,
-          "SAT solver Lingeling not compiled in, using %s",
-          oldval == BTOR_SAT_ENGINE_CADICAL
-              ? "CaDiCaL"
-              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
-      val = oldval;
-    }
+        || val == BTOR_SAT_ENGINE_LINGELING
 #endif
 #ifndef BTOR_USE_CADICAL
-    if (val == BTOR_SAT_ENGINE_CADICAL)
-    {
-      BTOR_WARN (
-          true,
-          "SAT solver CaDiCaL not compiled in, using %s",
-          oldval == BTOR_SAT_ENGINE_LINGELING
-              ? "Lingeling"
-              : (oldval == BTOR_SAT_ENGINE_MINISAT ? "MiniSat" : "PicoSAT"));
-      val = oldval;
-    }
+        || val == BTOR_SAT_ENGINE_CADICAL
 #endif
 #ifndef BTOR_USE_MINISAT
-    if (val == BTOR_SAT_ENGINE_MINISAT)
-    {
-      BTOR_WARN (val == BTOR_SAT_ENGINE_MINISAT,
-                 "SAT solver Minisat not compiled in, using %s",
-                 oldval == BTOR_SAT_ENGINE_CADICAL
-                     ? "CaDiCaL"
-                     : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling"
-                                                            : "PicoSAT"));
-      val = oldval;
-    }
+        || val == BTOR_SAT_ENGINE_MINISAT
 #endif
 #ifndef BTOR_USE_PICOSAT
-    if (val == BTOR_SAT_ENGINE_PICOSAT)
+        || val == BTOR_SAT_ENGINE_PICOSAT
+#endif
+#ifndef BTOR_USE_CMS
+        || val == BTOR_SAT_ENGINE_CMS
+#endif
+    )
     {
-      BTOR_WARN (val == BTOR_SAT_ENGINE_PICOSAT,
-                 "SAT solver PicoSAT not compiled in, using %s",
-                 oldval == BTOR_SAT_ENGINE_CADICAL
-                     ? "CaDiCaL"
-                     : (oldval == BTOR_SAT_ENGINE_LINGELING ? "Lingeling"
-                                                            : "MiniSat"));
+      BTOR_WARN (true,
+                 "SAT solver %s not compiled in, using %s",
+                 g_btor_se_name[val],
+                 g_btor_se_name[oldval]);
       val = oldval;
     }
-#endif
   }
-
 #ifndef BTOR_USE_LINGELING
   if (opt == BTOR_OPT_SAT_ENGINE_LGL_FORK)
   {
@@ -990,7 +851,7 @@ boolector_get_opt (Btor *btor, BtorOption opt)
 {
   uint32_t res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get (btor, opt);
   BTOR_TRAPI_RETURN_UINT (res);
@@ -1005,7 +866,7 @@ boolector_get_opt_min (Btor *btor, BtorOption opt)
 {
   uint32_t res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_min (btor, opt);
   BTOR_TRAPI_RETURN_UINT (res);
@@ -1020,7 +881,7 @@ boolector_get_opt_max (Btor *btor, BtorOption opt)
 {
   uint32_t res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_max (btor, opt);
   BTOR_TRAPI_RETURN_UINT (res);
@@ -1035,7 +896,7 @@ boolector_get_opt_dflt (Btor *btor, BtorOption opt)
 {
   uint32_t res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_dflt (btor, opt);
   BTOR_TRAPI_RETURN_UINT (res);
@@ -1050,7 +911,7 @@ boolector_get_opt_lng (Btor *btor, BtorOption opt)
 {
   const char *res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_lng (btor, opt);
   BTOR_TRAPI_RETURN_STR (res);
@@ -1065,7 +926,7 @@ boolector_get_opt_shrt (Btor *btor, BtorOption opt)
 {
   const char *res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_shrt (btor, opt);
   BTOR_TRAPI_RETURN_STR (res);
@@ -1080,7 +941,7 @@ boolector_get_opt_desc (Btor *btor, BtorOption opt)
 {
   const char *res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_get_desc (btor, opt);
   BTOR_TRAPI_RETURN_STR (res);
@@ -1095,7 +956,7 @@ boolector_has_opt (Btor *btor, BtorOption opt)
 {
   bool res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   res = btor_opt_is_valid (btor, opt);
   BTOR_TRAPI_RETURN_BOOL (res);
 #ifndef NDEBUG
@@ -1123,7 +984,7 @@ boolector_next_opt (Btor *btor, BtorOption opt)
 {
   BtorOption res;
   BTOR_ABORT_ARG_NULL (btor);
-  BTOR_TRAPI ("%s", btor_opt_get_lng (btor, opt));
+  BTOR_TRAPI ("%u %s", opt, btor_opt_get_lng (btor, opt));
   BTOR_ABORT (!btor_opt_is_valid (btor, opt), "invalid option");
   res = btor_opt_next (btor, opt);
   BTOR_TRAPI_RETURN_INT (res);
@@ -1702,25 +1563,31 @@ remove_unique_symbol_prefix (Btor *btor, const char *symbol)
 /* Create symbol that is unique in the current scope. Prefix symbols with
  * BTOR_<num_push_pop>@<symbol> to make them unique in the current context. */
 static char *
-mk_unique_symbol (Btor *btor, const char *symbol)
+mk_unique_symbol_aux (BtorMemMgr *mm, uint32_t num_push_pop, const char *symbol)
 {
   char *symb;
   size_t len;
-  if (btor->num_push_pop)
+  if (num_push_pop)
   {
     len = strlen (symbol) + 1;
     len += strlen ("BTOR_@");
-    len += btor_util_num_digits (btor->num_push_pop);
-    BTOR_CNEWN (btor->mm, symb, len);
-    sprintf (symb, "BTOR_%u@%s", btor->num_push_pop, symbol);
+    len += btor_util_num_digits (num_push_pop);
+    BTOR_CNEWN (mm, symb, len);
+    sprintf (symb, "BTOR_%u@%s", num_push_pop, symbol);
   }
   else
   {
-    symb = btor_mem_strdup (btor->mm, symbol);
+    symb = btor_mem_strdup (mm, symbol);
   }
-  assert (!symbol
-          || !strcmp (symbol, remove_unique_symbol_prefix (btor, symb)));
   return symb;
+}
+
+static char *
+mk_unique_symbol (Btor *btor, const char *symbol)
+{
+  char *res = mk_unique_symbol_aux (btor->mm, btor->num_push_pop, symbol);
+  assert (!symbol || !strcmp (symbol, remove_unique_symbol_prefix (btor, res)));
+  return res;
 }
 
 BoolectorNode *
@@ -2596,7 +2463,7 @@ boolector_sgte (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 BoolectorNode *
 boolector_sll (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 {
-  uint32_t width;
+  uint32_t width0, width1;
   BtorNode *e0, *e1, *res;
 
   e0 = BTOR_IMPORT_BOOLECTOR_NODE (n0);
@@ -2612,18 +2479,21 @@ boolector_sll (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_IS_NOT_BV (e0);
   BTOR_ABORT_IS_NOT_BV (e1);
 
-  width = btor_node_bv_get_width (btor, e0);
-  if (width == btor_node_bv_get_width (btor, e1))
+  width0 = btor_node_bv_get_width (btor, e0);
+  width1 = btor_node_bv_get_width (btor, e1);
+  if (width0 == width1)
   {
-    res = translate_shift (btor, e0, e1, btor_exp_bv_sll);
+    res = btor_exp_bv_sll (btor, e0, e1);
   }
   else
   {
-    BTOR_ABORT (!btor_util_is_power_of_2 (width),
+    BTOR_ABORT (!btor_util_is_power_of_2 (width0),
                 "bit-width of 'e0' must be a power of 2");
-    BTOR_ABORT (btor_util_log_2 (width) != btor_node_bv_get_width (btor, e1),
+    BTOR_ABORT (btor_util_log_2 (width0) != width1,
                 "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
-    res = btor_exp_bv_sll (btor, e0, e1);
+    BtorNode *tmp_e1 = btor_exp_bv_uext (btor, e1, width0 - width1);
+    res              = btor_exp_bv_sll (btor, e0, tmp_e1);
+    btor_node_release (btor, tmp_e1);
   }
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
@@ -2636,7 +2506,7 @@ boolector_sll (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 BoolectorNode *
 boolector_srl (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 {
-  uint32_t width;
+  uint32_t width0, width1;
   BtorNode *e0, *e1, *res;
 
   e0 = BTOR_IMPORT_BOOLECTOR_NODE (n0);
@@ -2651,18 +2521,21 @@ boolector_srl (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_BTOR_MISMATCH (btor, e1);
   BTOR_ABORT_IS_NOT_BV (e0);
   BTOR_ABORT_IS_NOT_BV (e1);
-  width = btor_node_bv_get_width (btor, e0);
-  if (width == btor_node_bv_get_width (btor, e1))
+  width0 = btor_node_bv_get_width (btor, e0);
+  width1 = btor_node_bv_get_width (btor, e1);
+  if (width0 == width1)
   {
-    res = translate_shift (btor, e0, e1, btor_exp_bv_srl);
+    res = btor_exp_bv_srl (btor, e0, e1);
   }
   else
   {
-    BTOR_ABORT (!btor_util_is_power_of_2 (width),
+    BTOR_ABORT (!btor_util_is_power_of_2 (width0),
                 "bit-width of 'e0' must be a power of 2");
-    BTOR_ABORT (btor_util_log_2 (width) != btor_node_bv_get_width (btor, e1),
+    BTOR_ABORT (btor_util_log_2 (width0) != width1,
                 "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
-    res = btor_exp_bv_srl (btor, e0, e1);
+    BtorNode *tmp_e1 = btor_exp_bv_uext (btor, e1, width0 - width1);
+    res              = btor_exp_bv_srl (btor, e0, tmp_e1);
+    btor_node_release (btor, tmp_e1);
   }
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
@@ -2675,7 +2548,7 @@ boolector_srl (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 BoolectorNode *
 boolector_sra (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 {
-  uint32_t width;
+  uint32_t width0, width1;
   BtorNode *e0, *e1, *res;
 
   e0 = BTOR_IMPORT_BOOLECTOR_NODE (n0);
@@ -2690,18 +2563,21 @@ boolector_sra (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_BTOR_MISMATCH (btor, e1);
   BTOR_ABORT_IS_NOT_BV (e0);
   BTOR_ABORT_IS_NOT_BV (e1);
-  width = btor_node_bv_get_width (btor, e0);
-  if (width == btor_node_bv_get_width (btor, e1))
+  width0 = btor_node_bv_get_width (btor, e0);
+  width1 = btor_node_bv_get_width (btor, e1);
+  if (width0 == width1)
   {
-    res = translate_shift (btor, e0, e1, btor_exp_bv_sra);
+    res = btor_exp_bv_sra (btor, e0, e1);
   }
   else
   {
-    BTOR_ABORT (!btor_util_is_power_of_2 (width),
+    BTOR_ABORT (!btor_util_is_power_of_2 (width0),
                 "bit-width of 'e0' must be a power of 2");
-    BTOR_ABORT (btor_util_log_2 (width) != btor_node_bv_get_width (btor, e1),
+    BTOR_ABORT (btor_util_log_2 (width0) != width1,
                 "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
-    res = btor_exp_bv_sra (btor, e0, e1);
+    BtorNode *tmp_e1 = btor_exp_bv_uext (btor, e1, width0 - width1);
+    res              = btor_exp_bv_sra (btor, e0, tmp_e1);
+    btor_node_release (btor, tmp_e1);
   }
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
@@ -2711,11 +2587,10 @@ boolector_sra (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   return BTOR_EXPORT_BOOLECTOR_NODE (res);
 }
 
-// TODO (ma): allow width(n0) == width(n1)
 BoolectorNode *
 boolector_rol (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 {
-  uint32_t width;
+  uint32_t width0, width1;
   BtorNode *e0, *e1, *res;
 
   BTOR_ABORT_ARG_NULL (btor);
@@ -2730,12 +2605,22 @@ boolector_rol (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_BTOR_MISMATCH (btor, e1);
   BTOR_ABORT_IS_NOT_BV (e0);
   BTOR_ABORT_IS_NOT_BV (e1);
-  width = btor_node_bv_get_width (btor, e0);
-  BTOR_ABORT (!btor_util_is_power_of_2 (width),
-              "bit-width of 'e0' must be a power of 2");
-  BTOR_ABORT (btor_util_log_2 (width) != btor_node_bv_get_width (btor, e1),
-              "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
-  res = btor_exp_bv_rol (btor, e0, e1);
+  width0 = btor_node_bv_get_width (btor, e0);
+  width1 = btor_node_bv_get_width (btor, e1);
+  if (width0 == width1)
+  {
+    res = btor_exp_bv_rol (btor, e0, e1);
+  }
+  else
+  {
+    BTOR_ABORT (!btor_util_is_power_of_2 (width0),
+                "bit-width of 'e0' must be a power of 2");
+    BTOR_ABORT (btor_util_log_2 (width0) != width1,
+                "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
+    BtorNode *tmp_e1 = btor_exp_bv_uext (btor, e1, width0 - width1);
+    res              = btor_exp_bv_rol (btor, e0, tmp_e1);
+    btor_node_release (btor, tmp_e1);
+  }
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
@@ -2744,11 +2629,10 @@ boolector_rol (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   return BTOR_EXPORT_BOOLECTOR_NODE (res);
 }
 
-// TODO (ma): allow width(n0) == width(n1)
 BoolectorNode *
 boolector_ror (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
 {
-  uint32_t width;
+  uint32_t width0, width1;
   BtorNode *e0, *e1, *res;
 
   e0 = BTOR_IMPORT_BOOLECTOR_NODE (n0);
@@ -2763,16 +2647,68 @@ boolector_ror (Btor *btor, BoolectorNode *n0, BoolectorNode *n1)
   BTOR_ABORT_BTOR_MISMATCH (btor, e1);
   BTOR_ABORT_IS_NOT_BV (e0);
   BTOR_ABORT_IS_NOT_BV (e1);
-  width = btor_node_bv_get_width (btor, e0);
-  BTOR_ABORT (!btor_util_is_power_of_2 (width),
-              "bit-width of 'e0' must be a power of 2");
-  BTOR_ABORT (btor_util_log_2 (width) != btor_node_bv_get_width (btor, e1),
-              "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
-  res = btor_exp_bv_ror (btor, e0, e1);
+  width0 = btor_node_bv_get_width (btor, e0);
+  width1 = btor_node_bv_get_width (btor, e1);
+  if (width0 == width1)
+  {
+    res = btor_exp_bv_ror (btor, e0, e1);
+  }
+  else
+  {
+    BTOR_ABORT (!btor_util_is_power_of_2 (width0),
+                "bit-width of 'e0' must be a power of 2");
+    BTOR_ABORT (btor_util_log_2 (width0) != width1,
+                "bit-width of 'e1' must be equal to log2(bit-width of 'e0')");
+    BtorNode *tmp_e1 = btor_exp_bv_uext (btor, e1, width0 - width1);
+    res              = btor_exp_bv_ror (btor, e0, tmp_e1);
+    btor_node_release (btor, tmp_e1);
+  }
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
   BTOR_CHKCLONE_RES_PTR (res, ror, BTOR_CLONED_EXP (e0), BTOR_CLONED_EXP (e1));
+#endif
+  return BTOR_EXPORT_BOOLECTOR_NODE (res);
+}
+
+BoolectorNode *
+boolector_roli (Btor *btor, BoolectorNode *n, uint32_t nbits)
+{
+  BtorNode *exp, *res;
+
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (n);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_TRAPI_UNFUN_EXT (exp, "%u", nbits);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_ABORT_IS_NOT_BV (exp);
+  res = btor_exp_bv_roli (btor, exp, nbits);
+  btor_node_inc_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_NODE (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_PTR (res, roli, BTOR_CLONED_EXP (exp), nbits);
+#endif
+  return BTOR_EXPORT_BOOLECTOR_NODE (res);
+}
+
+BoolectorNode *
+boolector_rori (Btor *btor, BoolectorNode *n, uint32_t nbits)
+{
+  BtorNode *exp, *res;
+
+  exp = BTOR_IMPORT_BOOLECTOR_NODE (n);
+  BTOR_ABORT_ARG_NULL (btor);
+  BTOR_ABORT_ARG_NULL (exp);
+  BTOR_TRAPI_UNFUN_EXT (exp, "%u", nbits);
+  BTOR_ABORT_REFS_NOT_POS (exp);
+  BTOR_ABORT_BTOR_MISMATCH (btor, exp);
+  BTOR_ABORT_IS_NOT_BV (exp);
+  res = btor_exp_bv_rori (btor, exp, nbits);
+  btor_node_inc_ext_ref_counter (btor, res);
+  BTOR_TRAPI_RETURN_NODE (res);
+#ifndef NDEBUG
+  BTOR_CHKCLONE_RES_PTR (res, rori, BTOR_CLONED_EXP (exp), nbits);
 #endif
   return BTOR_EXPORT_BOOLECTOR_NODE (res);
 }
@@ -3609,7 +3545,10 @@ boolector_match_node_by_id (Btor *btor, int32_t id)
   BTOR_ABORT (id <= 0, "node id must be > 0");
   BTOR_TRAPI ("%d", id);
   res = btor_node_match_by_id (btor, id);
-  BTOR_ABORT (!res, "invalid node id '%d', node does not exist", id);
+  BTOR_ABORT (
+      !res,
+      "invalid node id '%d', no matching node in given Boolector instance",
+      id);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
@@ -3622,13 +3561,21 @@ BoolectorNode *
 boolector_match_node_by_symbol (Btor *btor, const char *symbol)
 {
   char *symb;
+  uint32_t i;
   BtorNode *res;
   BTOR_ABORT_ARG_NULL (btor);
   BTOR_ABORT_ARG_NULL (symbol);
   BTOR_TRAPI ("%s", symbol);
-  symb = mk_unique_symbol (btor, symbol);
-  res  = btor_node_match_by_symbol (btor, symb);
-  btor_mem_freestr (btor->mm, symb);
+  for (i = 0, res = 0; !res && i <= btor->num_push_pop; i++)
+  {
+    symb = mk_unique_symbol_aux (btor->mm, i, symbol);
+    res  = btor_node_match_by_symbol (btor, symb);
+    btor_mem_freestr (btor->mm, symb);
+  }
+  BTOR_ABORT (
+      !res,
+      "invalid symbol'%s', no matching node in given Boolector instance",
+      symbol);
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
@@ -3647,6 +3594,8 @@ boolector_match_node (Btor *btor, BoolectorNode *node)
   BTOR_TRAPI_UNFUN (exp);
   BTOR_ABORT_REFS_NOT_POS (exp);
   res = btor_node_match (btor, exp);
+  BTOR_ABORT (!res,
+              "invalid node, no matching node in given Boolector instance");
   btor_node_inc_ext_ref_counter (btor, res);
   BTOR_TRAPI_RETURN_NODE (res);
 #ifndef NDEBUG
@@ -3691,7 +3640,16 @@ boolector_set_symbol (Btor *btor, BoolectorNode *node, const char *symbol)
   BTOR_ABORT_REFS_NOT_POS (exp);
   BTOR_ABORT_BTOR_MISMATCH (btor, exp);
   symb = mk_unique_symbol (btor, symbol);
-  btor_node_set_symbol (btor, exp, symb);
+
+  if (btor_hashptr_table_get (btor->symbols, symb))
+  {
+    BTOR_WARN (
+        true, "symbol %s already defined, ignoring setting symbol", symbol);
+  }
+  else
+  {
+    btor_node_set_symbol (btor, exp, symb);
+  }
   btor_mem_freestr (btor->mm, symb);
 #ifndef NDEBUG
   BTOR_CHKCLONE_NORES (set_symbol, BTOR_CLONED_EXP (exp), symbol);
@@ -4108,12 +4066,15 @@ generate_fun_model_str (
   assert (size);
   assert (btor_node_is_regular (exp));
 
-  char *arg, *tmp, *bv;
+  char *arg, *tmp, **bv;
   uint32_t i, j, len;
   BtorPtrHashTableIterator it;
   const BtorPtrHashTable *model;
   BtorBitVector *value;
   BtorBitVectorTuple *t;
+  uint32_t opt;
+
+  opt = btor_opt_get (btor, BTOR_OPT_OUTPUT_NUMBER_FORMAT);
 
   exp = btor_simplify_exp (btor, exp);
   assert (btor_node_is_fun (exp));
@@ -4140,27 +4101,65 @@ generate_fun_model_str (
     value = (BtorBitVector *) it.bucket->data.as_ptr;
 
     /* build assignment string for all arguments */
-    t   = (BtorBitVectorTuple *) btor_iter_hashptr_next (&it);
-    len = t->arity;
-    for (j = 0; j < t->arity; j++) len += t->bv[j]->width;
-    BTOR_NEWN (btor->mm, arg, len);
-    tmp = arg;
-
-    bv = btor_bv_to_char (btor->mm, t->bv[0]);
-    strcpy (tmp, bv);
-    btor_mem_freestr (btor->mm, bv);
-
-    for (j = 1; j < t->arity; j++)
+    t = (BtorBitVectorTuple *) btor_iter_hashptr_next (&it);
+    if (t->arity)
     {
-      bv = btor_bv_to_char (btor->mm, t->bv[j]);
-      strcat (tmp, " ");
-      strcat (tmp, bv);
-      btor_mem_freestr (btor->mm, bv);
-    }
-    assert (strlen (arg) == len - 1);
+      BTOR_CNEWN (btor->mm, bv, t->arity);
+      len = t->arity;
+      for (j = 0; j < t->arity; j++)
+      {
+        switch (opt)
+        {
+          case BTOR_OUTPUT_BASE_HEX:
+            bv[j] = btor_bv_to_hex_char (btor->mm, t->bv[j]);
+            break;
+          case BTOR_OUTPUT_BASE_DEC:
+            bv[j] = btor_bv_to_dec_char (btor->mm, t->bv[j]);
+            break;
+          default:
+            assert (opt == BTOR_OUTPUT_BASE_BIN);
+            bv[j] = btor_bv_to_char (btor->mm, t->bv[j]);
+        }
+        len += strlen (bv[j]);
+      }
+      BTOR_CNEWN (btor->mm, arg, len);
+      tmp = arg;
+      strncpy (tmp, bv[0], len);
+      len -= strlen (bv[0]);
 
-    (*args)[i]   = arg;
-    (*values)[i] = (char *) btor_bv_to_char (btor->mm, value);
+      for (j = 1; j < t->arity; j++)
+      {
+        strncat (tmp, " ", len);
+        len -= 1;
+        strncat (tmp, bv[j], len);
+        len -= strlen (bv[j]);
+      }
+      for (j = 0; j < t->arity; j++) btor_mem_freestr (btor->mm, bv[j]);
+      BTOR_DELETEN (btor->mm, bv, t->arity);
+      len -= 1;
+      assert (len == 0);
+    }
+    /* If argument tuple has arity 0, value represents the default value for
+     * the function/array (constant arrays). */
+    else
+    {
+      BTOR_CNEWN (btor->mm, arg, 2);
+      arg[0] = '*';
+    }
+
+    (*args)[i] = arg;
+    switch (opt)
+    {
+      case BTOR_OUTPUT_BASE_HEX:
+        (*values)[i] = (char *) btor_bv_to_hex_char (btor->mm, value);
+        break;
+      case BTOR_OUTPUT_BASE_DEC:
+        (*values)[i] = (char *) btor_bv_to_dec_char (btor->mm, value);
+        break;
+      default:
+        assert (opt == BTOR_OUTPUT_BASE_BIN);
+        (*values)[i] = (char *) btor_bv_to_char (btor->mm, value);
+    }
     i++;
   }
 }
@@ -4273,7 +4272,8 @@ boolector_free_array_assignment (Btor *btor,
 
   funass =
       btor_ass_get_fun ((const char **) indices, (const char **) values, size);
-  (void) funass;
+  BTOR_ABORT (size != funass->size,
+              "wrong size given, expected %u, but got %u", funass->size, size);
 #ifndef NDEBUG
   char **cindices, **cvalues;
   cindices = funass->cloned_indices;
@@ -4356,7 +4356,8 @@ boolector_free_uf_assignment (Btor *btor,
   BTOR_ABORT (!size && values, "non zero 'values' but 'size == 0'");
   funass =
       btor_ass_get_fun ((const char **) args, (const char **) values, size);
-  (void) funass;
+  BTOR_ABORT (size != funass->size,
+              "wrong size given, expected %u, but got %u", funass->size, size);
 #ifndef NDEBUG
   char **cargs, **cvalues;
   cargs   = funass->cloned_indices;
@@ -4664,7 +4665,8 @@ boolector_parse (Btor *btor,
                  const char *infile_name,
                  FILE *outfile,
                  char **error_msg,
-                 int32_t *status)
+                 int32_t *status,
+                 bool *parsed_smt2)
 {
   int32_t res;
 
@@ -4676,7 +4678,8 @@ boolector_parse (Btor *btor,
   BTOR_ABORT_ARG_NULL (status);
   BTOR_ABORT (BTOR_COUNT_STACK (btor->nodes_id_table) > 2,
               "file parsing must be done before creating expressions");
-  res = btor_parse (btor, infile, infile_name, outfile, error_msg, status);
+  res = btor_parse (
+      btor, infile, infile_name, outfile, error_msg, status, parsed_smt2);
   /* shadow clone can not shadow boolector_parse* (parser uses API calls only,
    * hence all API calls issued while parsing are already shadowed and the
    * shadow clone already maintains the parsed formula) */
@@ -4912,7 +4915,7 @@ boolector_copyright (Btor *btor)
   return "This software is\n"
          "Copyright (c) 2007-2009 Robert Brummayer\n"
          "Copyright (c) 2007-2018 Armin Biere\n"
-         "Copyright (c) 2012-2018 Aina Niemetz, Mathias Preiner\n"
+         "Copyright (c) 2012-2020 Aina Niemetz, Mathias Preiner\n"
 #ifdef BTOR_USE_LINGELING
          "\n"
          "This software is linked against Lingeling\n"
@@ -4931,7 +4934,12 @@ boolector_copyright (Btor *btor)
 #ifdef BTOR_USE_CADICAL
          "\n"
          "This software is linked against CaDiCaL\n"
-         "Copyright (c) 2016-2018 Armin Biere\n"
+         "Copyright (c) 2016-2020 Armin Biere\n"
+#endif
+#ifdef BTOR_USE_CMS
+         "\n"
+         "This software is linked against CryptoMiniSat\n"
+         "Copyright (c) 2009-2020 Mate Soos\n"
 #endif
          "";
 }

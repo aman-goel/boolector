@@ -205,6 +205,8 @@ BtorNode *btor_exp_bv_nor (Btor *btor, BtorNode *e0, BtorNode *e1);
  */
 BtorNode *btor_exp_bv_add (Btor *btor, BtorNode *e0, BtorNode *e1);
 
+BtorNode *btor_exp_bv_add_n (Btor *btor, BtorNode *args[], uint32_t argc);
+
 /**
  * Create bit-vector unsigned overflow check for add.
  * Result represents if adding two unsigned operands leads to an overflow.
@@ -340,6 +342,20 @@ BtorNode *btor_exp_bv_rol (Btor *btor, BtorNode *e0, BtorNode *e1);
  * width(result) = width(e0)
  */
 BtorNode *btor_exp_bv_ror (Btor *btor, BtorNode *e0, BtorNode *e1);
+
+/**
+ * Create bit-vector rotate left, with the number of bits to rotate by
+ * given as an unsigned integer.
+ * width(result) = width(e0)
+ */
+BtorNode *btor_exp_bv_roli (Btor *btor, BtorNode *exp, uint32_t nbits);
+
+/**
+ * Create bit-vector rotate right, with the number of bits to rotate by
+ * given as an unsigned integer.
+ * width(result) = width(e0)
+ */
+BtorNode *btor_exp_bv_rori (Btor *btor, BtorNode *exp, uint32_t nbits);
 
 /**
  * Create bit-vector subtraction.

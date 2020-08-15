@@ -151,6 +151,24 @@ init_options (BtorMC *mc)
             0,
             1,
             "always print states in trace");
+  init_opt (mc,
+            BTOR_MC_OPT_KINDUCTION,
+            true,
+            "kind",
+            0,
+            0,
+            0,
+            1,
+            "enable k-induction");
+  init_opt (mc,
+            BTOR_MC_OPT_SIMPLE_PATH,
+            true,
+            "simple-path",
+            0,
+            0,
+            0,
+            1,
+            "add simple path constraints");
 }
 
 /*------------------------------------------------------------------------*/
@@ -224,6 +242,7 @@ btor_mc_new (void)
   BTOR_INIT_STACK (mm, res->bad);
   BTOR_INIT_STACK (mm, res->constraints);
   BTOR_INIT_STACK (mm, res->reached);
+  BTOR_INIT_STACK (mm, res->init_assumptions);
   init_options (res);
   return res;
 }
@@ -317,6 +336,9 @@ btor_mc_delete (BtorMC *mc)
     boolector_release (btor, BTOR_POP_STACK (mc->constraints));
   BTOR_RELEASE_STACK (mc->constraints);
   BTOR_RELEASE_STACK (mc->reached);
+  while (mc->forward && !BTOR_EMPTY_STACK (mc->init_assumptions))
+    boolector_release (mc->forward, BTOR_POP_STACK (mc->init_assumptions));
+  BTOR_RELEASE_STACK (mc->init_assumptions);
   if (mc->forward) boolector_delete (mc->forward);
   BTOR_DELETEN (mm, mc->options, BTOR_MC_OPT_NUM_OPTS);
   BTOR_DELETE (mm, mc);
@@ -839,6 +861,15 @@ initialize_states_of_frame (BtorMC *mc, BoolectorNodeMap *map, BtorMCFrame *f)
         boolector_release (fwd, dst);
         dst = tmp;
       }
+
+      if (btor_mc_get_opt (mc, BTOR_MC_OPT_KINDUCTION))
+      {
+        BoolectorNode *init_expr = dst;
+        dst                      = new_var_or_array (mc, src, 0);
+        BTOR_PUSH_STACK (mc->init_assumptions,
+                         boolector_eq (mc->forward, dst, init_expr));
+        boolector_release (mc->forward, init_expr);
+      }
     }
     else if (f->time > 0 && state->next)
     {
@@ -1091,37 +1122,42 @@ print_witness_at_time (BtorMC *mc, BoolectorNode *node, int32_t time)
 }
 
 static void
-print_witness (BtorMC *mc, int32_t time)
+print_witness (BtorMC *mc, int32_t time, size_t bad_id)
 {
   assert (time >= 0);
+  assert (BTOR_PEEK_STACK (mc->reached, bad_id) == time);
 
   size_t i;
   BtorMCstate *state;
   BoolectorNode *src;
   BtorPtrHashTableIterator it;
-  bool full_trace;
+  bool full_trace, printed_state_header;
 
   full_trace = btor_mc_get_opt (mc, BTOR_MC_OPT_TRACE_GEN_FULL) == 1;
 
-  printf ("sat\n");
-  for (i = 0; i < BTOR_COUNT_STACK (mc->reached); i++)
-  {
-    if (BTOR_PEEK_STACK (mc->reached, i) == time) printf ("b%zu ", i);
-  }
-  printf ("\n");
+  printf ("sat\nb%zu\n", bad_id);
 
   for (i = 0; i <= (size_t) time; i++)
   {
-    if (i == 0 || full_trace)
+    /* We have to print the state assignments if
+     * 1) the state is uninitialized
+     * 2) the state has no next function (primary input)
+     * 3) the user wants a full trace
+     * In all other cases the state part can be omitted. */
+    printed_state_header = false;
+    btor_iter_hashptr_init (&it, mc->states);
+    while (btor_iter_hashptr_has_next (&it))
     {
-      printf ("#%zu\n", i);
-      btor_iter_hashptr_init (&it, mc->states);
-      while (btor_iter_hashptr_has_next (&it))
+      state = it.bucket->data.as_ptr;
+      assert (state);
+      src = (BoolectorNode *) btor_iter_hashptr_next (&it);
+      if (((i == 0) && !state->init) || !state->next || full_trace)
       {
-        state = it.bucket->data.as_ptr;
-        assert (state);
-        src = (BoolectorNode *) btor_iter_hashptr_next (&it);
-        if (!full_trace && state->init) continue;
+        if (!printed_state_header)
+        {
+          printed_state_header = true;
+          printf ("#%zu\n", i);
+        }
         print_witness_at_time (mc, src, i);
       }
     }
@@ -1138,19 +1174,173 @@ print_witness (BtorMC *mc, int32_t time)
   fflush (stdout);
 }
 
+/* Check whether n1 and n2 are distinct. For bit-vectors we check if the values
+ * are distinct, for arrays we check if the arrays differ on at least one
+ * index. */
+static bool
+is_distinct (Btor *btor, BoolectorNode *n1, BoolectorNode *n2)
+{
+  bool res = false;
+  const char *val1, *val2;
+  char **indices1 = 0, **indices2 = 0, **values1 = 0, **values2 = 0;
+  uint32_t i, size1, size2;
+  BtorPtrHashTable *cache;
+  BtorPtrHashBucket *b;
+
+  if (boolector_is_array (btor, n1))
+  {
+    assert (boolector_is_array (btor, n2));
+    cache = btor_hashptr_table_new (btor->mm, btor_hash_str, btor_compare_str);
+
+    boolector_array_assignment (btor, n1, &indices1, &values1, &size1);
+    boolector_array_assignment (btor, n2, &indices2, &values2, &size2);
+
+    for (i = 0; i < size1; i++)
+    {
+      assert (!btor_hashptr_table_get (cache, indices1[i]));
+      btor_hashptr_table_add (cache, indices1[i])->data.as_str = values1[i];
+    }
+    for (i = 0; i < size2; i++)
+    {
+      if ((b = btor_hashptr_table_get (cache, indices2[i])))
+      {
+        if (strcmp (b->data.as_str, values2[i]))
+        {
+          res = true;
+          break;
+        }
+      }
+    }
+    boolector_free_array_assignment (btor, indices1, values1, size1);
+    boolector_free_array_assignment (btor, indices2, values2, size2);
+  }
+  else
+  {
+    val1 = boolector_bv_assignment (btor, n1);
+    val2 = boolector_bv_assignment (btor, n2);
+    res  = strcmp (val1, val2) != 0;
+    boolector_free_bv_assignment (btor, val1);
+    boolector_free_bv_assignment (btor, val2);
+  }
+  return res;
+}
+
+static BoolectorNode *
+create_distinct_state (BtorMC *mc, BtorMCFrame *f1, BtorMCFrame *f2)
+{
+  assert (BTOR_COUNT_STACK (f1->states) == BTOR_COUNT_STACK (f2->states));
+
+  size_t i, num_states;
+  bool distinct = false;
+  Btor *btor;
+  BoolectorNode *s1, *s2, *res = 0, *tmp, *eq;
+
+  btor       = mc->forward;
+  num_states = BTOR_COUNT_STACK (f1->states);
+  for (i = 0; i < num_states; i++)
+  {
+    s1 = BTOR_PEEK_STACK (f1->states, i);
+    s2 = BTOR_PEEK_STACK (f2->states, i);
+
+    if (is_distinct (btor, s1, s2))
+    {
+      distinct = true;
+      break;
+    }
+
+    eq = boolector_eq (btor, s1, s2);
+    if (res)
+    {
+      tmp = boolector_and (btor, res, eq);
+      boolector_release (btor, res);
+      boolector_release (btor, eq);
+      res = tmp;
+    }
+    else
+    {
+      res = eq;
+    }
+  }
+
+  if (distinct)
+  {
+    if (res) boolector_release (btor, res);
+    res = 0;
+  }
+  else
+  {
+    assert (res);
+    tmp = boolector_not (btor, res);
+    boolector_release (btor, res);
+    res = tmp;
+  }
+  return res;
+}
+
+static bool
+add_simple_path_constraints (BtorMC *mc)
+{
+  bool res;
+  size_t i, j, num_frames;
+  Btor *btor;
+  BtorMCFrame *f1, *f2;
+  BoolectorNode *constraint;
+  BoolectorNodePtrStack constraints;
+
+  btor = mc->forward;
+
+  BTOR_INIT_STACK (mc->mm, constraints);
+
+  // TODO:
+  //   cache simple path constraints
+  num_frames = BTOR_COUNT_STACK (mc->frames);
+  for (i = 0; i < num_frames; i++)
+  {
+    f1 = mc->frames.start + i;
+    for (j = i + 1; j < num_frames; j++)
+    {
+      f2         = mc->frames.start + j;
+      constraint = create_distinct_state (mc, f1, f2);
+
+      if (constraint)
+      {
+        BTOR_PUSH_STACK (constraints, constraint);
+        BTOR_MSG (boolector_get_btor_msg (btor),
+                  1,
+                  "adding simple path constraints for %zu and %zu",
+                  i,
+                  j);
+      }
+    }
+  }
+
+  for (i = 0; i < BTOR_COUNT_STACK (constraints); i++)
+  {
+    constraint = BTOR_PEEK_STACK (constraints, i);
+    boolector_assert (btor, constraint);
+    boolector_release (btor, constraint);
+  }
+  res = !BTOR_EMPTY_STACK(constraints);
+  BTOR_RELEASE_STACK (constraints);
+  return res;
+}
+
 static int32_t
 check_last_forward_frame (BtorMC *mc)
 {
   assert (mc);
 
-  size_t i;
-  int32_t k, res, satisfied;
+  size_t i, j;
+  int32_t k, res, reachable, unreachable;
+  bool opt_kinduction, opt_simple_path;
   BtorMCFrame *f;
   BoolectorNode *bad;
   Btor *btor;
 
   btor = mc->btor;
 
+  opt_kinduction = btor_mc_get_opt (mc, BTOR_MC_OPT_KINDUCTION) == 1;
+  opt_simple_path = btor_mc_get_opt (mc, BTOR_MC_OPT_SIMPLE_PATH) == 1;
   k = BTOR_COUNT_STACK (mc->frames) - 1;
   assert (k >= 0);
   f = mc->frames.top - 1;
@@ -1160,7 +1350,8 @@ check_last_forward_frame (BtorMC *mc)
             1,
             "checking forward frame at bound k = %d",
             k);
-  satisfied = 0;
+  reachable   = 0;
+  unreachable = 0;
 
   for (i = 0; i < BTOR_COUNT_STACK (f->bad); i++)
   {
@@ -1184,17 +1375,24 @@ check_last_forward_frame (BtorMC *mc)
               "checking forward frame bad state property %zu at bound k = %d",
               i,
               k);
+
     boolector_assume (mc->forward, bad);
+    for (j = 0; j < BTOR_COUNT_STACK (mc->init_assumptions); j++)
+    {
+      assert (opt_kinduction);
+      boolector_assume (mc->forward, BTOR_PEEK_STACK (mc->init_assumptions, j));
+    }
+
     res = boolector_sat (mc->forward);
     if (res == BOOLECTOR_SAT)
     {
       mc->state = BTOR_SAT_MC_STATE;
       BTOR_MSG (boolector_get_btor_msg (btor),
                 1,
-                "bad state property %zu at bound k = %d SATISFIABLE",
+                "bad state property %zu reachable at bound k = %d SATISFIABLE",
                 i,
                 k);
-      satisfied++;
+      reachable++;
       if (BTOR_PEEK_STACK (mc->reached, i) < 0)
       {
         mc->num_reached++;
@@ -1208,17 +1406,59 @@ check_last_forward_frame (BtorMC *mc)
       }
 
       if (btor_mc_get_opt (mc, BTOR_MC_OPT_TRACE_GEN))
-        print_witness (mc, k);
+      {
+        print_witness (mc, k, i);
+      }
+
+      if (btor_mc_get_opt (mc, BTOR_MC_OPT_STOP_FIRST))
+        break;
     }
     else
     {
       assert (res == BOOLECTOR_UNSAT);
-      mc->state = BTOR_UNSAT_MC_STATE;
-      BTOR_MSG (boolector_get_btor_msg (btor),
-                1,
-                "bad state property %zu at bound k = %d UNSATISFIABLE",
-                i,
-                k);
+
+      if (opt_kinduction)
+      {
+      KINDUCTION_RECHECK:
+        boolector_assume (mc->forward, bad);
+        res = boolector_sat (mc->forward);
+
+        if (res == BOOLECTOR_SAT)
+        {
+          if (opt_simple_path && add_simple_path_constraints (mc))
+          {
+            goto KINDUCTION_RECHECK;
+          }
+          BoolectorNode *not_bad = boolector_not (mc->forward, bad);
+          boolector_assert (mc->forward, not_bad);
+          boolector_release (mc->forward, not_bad);
+          mc->state = BTOR_NO_MC_STATE;
+        }
+        else
+        {
+          mc->state = BTOR_UNSAT_MC_STATE;
+          BTOR_MSG (boolector_get_btor_msg (btor),
+                    1,
+                    "bad state property %zu unreachable at bound k = %d "
+                    "UNSATISFIABLE",
+                    i,
+                    k);
+          mc->num_reached++;
+          assert (mc->num_reached <= BTOR_COUNT_STACK (mc->bad));
+          BTOR_POKE_STACK (mc->reached, i, k);
+          printf ("unsat\nb%zd\n", i);
+          unreachable++;
+        }
+      }
+      else
+      {
+        mc->state = BTOR_UNSAT_MC_STATE;
+        BTOR_MSG (boolector_get_btor_msg (btor),
+                  1,
+                  "bad state property %zu at bound k = %d UNSATISFIABLE",
+                  i,
+                  k);
+      }
     }
     if (btor_mc_get_opt (mc, BTOR_MC_OPT_BTOR_STATS))
       boolector_print_stats (mc->forward);
@@ -1226,11 +1466,13 @@ check_last_forward_frame (BtorMC *mc)
 
   BTOR_MSG (boolector_get_btor_msg (btor),
             1,
-            "found %d satisfiable bad state properties at bound k = %d",
-            satisfied,
+            "found %d reachable and %d unreachable bad state properties "
+            "at bound k = %d",
+            reachable,
+            unreachable,
             k);
 
-  return satisfied;
+  return reachable;
 }
 
 int32_t
@@ -1282,6 +1524,73 @@ btor_mc_bmc (BtorMC *mc, int32_t mink, int32_t maxk)
                   k);
         assert (k >= 0);
         return k;
+      }
+    }
+  }
+
+  BTOR_MSG (boolector_get_btor_msg (btor), 2, "entering UNSAT state");
+  mc->state = BTOR_UNSAT_MC_STATE;
+
+  return -1;
+}
+
+int32_t
+btor_mc_kind (BtorMC *mc, int32_t mink, int32_t maxk)
+{
+  assert (mc);
+
+  int32_t k;
+  Btor *btor;
+
+  btor = mc->btor;
+
+  mc_release_assignments (mc);
+
+  BTOR_MSG (boolector_get_btor_msg (btor),
+            1,
+            "calling k-induction on %u properties from bound %d "
+            "up-to maximum bound k = %d",
+            BTOR_COUNT_STACK (mc->bad),
+            mink,
+            maxk);
+
+  BTOR_MSG (
+      boolector_get_btor_msg (btor),
+      1,
+      "trace generation %s",
+      btor_mc_get_opt (mc, BTOR_MC_OPT_TRACE_GEN) ? "enabled" : "disabled");
+
+  mc->state = BTOR_NO_MC_STATE;
+
+  while ((k = BTOR_COUNT_STACK (mc->frames)) <= maxk)
+  {
+    if (mc->call_backs.starting_bound.fun)
+    {
+      mc->call_backs.starting_bound.fun (mc->call_backs.starting_bound.state,
+                                         k);
+    }
+
+    initialize_new_forward_frame (mc);
+    if (k < mink) continue;
+    (void) check_last_forward_frame (mc);
+    if (mc->state != BTOR_NO_MC_STATE)
+    {
+      if (btor_mc_get_opt (mc, BTOR_MC_OPT_STOP_FIRST)
+          || mc->num_reached == BTOR_COUNT_STACK (mc->bad) || k == maxk)
+      {
+        if (mc->state == BTOR_SAT_MC_STATE)
+        {
+          BTOR_MSG (boolector_get_btor_msg (btor),
+                    2,
+                    "entering SAT state at bound k=%d",
+                    k);
+          assert (k >= 0);
+          return k;
+        }
+        else
+        {
+          return k;
+        }
       }
     }
   }

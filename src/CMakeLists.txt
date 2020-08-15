@@ -9,11 +9,14 @@ set(libboolector_src_files
   btorbeta.c
   btorbv.c
   btorchkclone.c
+  btorchkmodel.c
+  btorchkfailed.c
   btorclone.c
   btorcore.c
   btordbg.c
   btordcr.c
   btorexp.c
+  btorlsutils.c
   btormc.c
   btormodel.c
   btormsg.c
@@ -21,40 +24,48 @@ set(libboolector_src_files
   btoropt.c
   btorparse.c
   btorprintmodel.c
+  btorproputils.c
   btorrewrite.c
   btorrwcache.c
   btorsat.c
+  btorslsutils.c
   btorslvaigprop.c
   btorslvfun.c
   btorslvprop.c
-  btorslvpropsls.c
   btorslvquant.c
   btorslvsls.c
   btorsort.c
+  btorsubst.c
   btorsynth.c
   btortrapi.c
   dumper/btordumpaig.c
   dumper/btordumpbtor.c
   dumper/btordumpsmt.c
-  normalizer/btornormquant.c
-  normalizer/btorskolemize.c
   parser/btorbtor.c
   parser/btorbtor2.c
   parser/btorsmt.c
   parser/btorsmt2.c
+  preprocess/btorpputils.c
+  preprocess/btorack.c
+  preprocess/btorder.c
+  preprocess/btorelimapplies.c
+  preprocess/btorelimslices.c
+  preprocess/btorembed.c
+  preprocess/btorextract.c
+  preprocess/btormerge.c
+  preprocess/btorminiscope.c
+  preprocess/btornormadd.c
+  preprocess/btornormquant.c
+  preprocess/btorpreprocess.c
+  preprocess/btorskel.c
+  preprocess/btorskolemize.c
+  preprocess/btorunconstrained.c
+  preprocess/btorvarsubst.c
   sat/btorcadical.c
+  sat/btorcms.cc
   sat/btorlgl.c
   sat/btorminisat.cc
   sat/btorpicosat.c
-  simplifier/btorack.c
-  simplifier/btorder.c
-  simplifier/btorelimapplies.c
-  simplifier/btorelimslices.c
-  simplifier/btorextract.c
-  simplifier/btormerge.c
-  simplifier/btorminiscope.c
-  simplifier/btorskel.c
-  simplifier/btorunconstrained.c
   utils/boolectornodemap.c
   utils/btoraigmap.c
   utils/btorhashint.c
@@ -87,6 +98,11 @@ target_include_directories(boolector
 target_include_directories(boolector PRIVATE ${Btor2Tools_INCLUDE_DIR})
 target_link_libraries(boolector ${Btor2Tools_LIBRARIES})
 
+if(GMP_FOUND)
+  target_include_directories(boolector PRIVATE ${GMP_INCLUDE_DIR})
+  target_link_libraries(boolector ${GMP_LIBRARIES})
+endif()
+
 if(Lingeling_FOUND)
   target_include_directories(boolector PRIVATE ${Lingeling_INCLUDE_DIR})
   target_link_libraries(boolector ${Lingeling_LIBRARIES})
@@ -95,6 +111,11 @@ endif()
 if(CaDiCaL_FOUND)
   target_include_directories(boolector PRIVATE ${CaDiCaL_INCLUDE_DIR})
   target_link_libraries(boolector ${CaDiCaL_LIBRARIES})
+endif()
+
+if(CryptoMiniSat_FOUND)
+  target_include_directories(boolector PRIVATE ${CryptoMiniSat_INCLUDE_DIR})
+  target_link_libraries(boolector ${CryptoMiniSat_LIBRARIES})
 endif()
 
 if(PicoSAT_FOUND)
@@ -130,16 +151,6 @@ set_target_properties(boolector-bin
   PROPERTIES
     OUTPUT_NAME boolector
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-if(NOT BUILD_SHARED_LIBS AND NOT APPLE)
-  set(BTOR_STATIC_FLAGS "-static")
-  if(HAVE_NO_EXPORT_DYNAMIC)
-    set(BTOR_STATIC_FLAGS "${BTOR_STATIC_FLAGS} -Wl,--no-export-dynamic")
-  endif()
-  set_target_properties(boolector-bin
-    PROPERTIES
-      LINK_FLAGS ${BTOR_STATIC_FLAGS}
-      LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)
-endif()
 install(TARGETS boolector-bin DESTINATION bin)
 
 #-----------------------------------------------------------------------------#
@@ -180,3 +191,22 @@ set(btorimc_src_files
 )
 add_executable (btorimc ${btorimc_src_files})
 target_link_libraries(btorimc boolector)
+
+#-----------------------------------------------------------------------------#
+# Static binaries
+
+if(NOT BUILD_SHARED_LIBS AND NOT APPLE)
+  set(BTOR_STATIC_FLAGS "-static")
+  set(STATIC_TARGETS boolector-bin btormc btoruntrace btorimc)
+
+  if(HAVE_NO_EXPORT_DYNAMIC)
+    set(BTOR_STATIC_FLAGS "${BTOR_STATIC_FLAGS} -Wl,--no-export-dynamic")
+  endif()
+  if(NOT IS_WINDOWS_BUILD)
+    set(STATIC_TARGETS ${STATIC_TARGETS} btormbt)
+  endif()
+  set_target_properties(${STATIC_TARGETS}
+    PROPERTIES
+      LINK_FLAGS ${BTOR_STATIC_FLAGS}
+      LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)
+endif()

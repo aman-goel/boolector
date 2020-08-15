@@ -3,7 +3,7 @@
  *  Copyright (C) 2007-2009 Robert Daniel Brummayer.
  *  Copyright (C) 2007-2013 Armin Biere.
  *  Copyright (C) 2012-2017 Mathias Preiner.
- *  Copyright (C) 2012-2017 Aina Niemetz.
+ *  Copyright (C) 2012-2019 Aina Niemetz.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -16,6 +16,7 @@
 #include "btordbg.h"
 
 #include <limits.h>
+#include "btorlog.h"
 #include "utils/btorhashptr.h"
 #include "utils/btorutil.h"
 
@@ -59,7 +60,14 @@ btor_dbg_check_unique_table_children_proxy_free (const Btor *btor)
   for (i = 0; i < btor->nodes_unique_table.size; i++)
     for (cur = btor->nodes_unique_table.chains[i]; cur; cur = cur->next)
       for (j = 0; j < cur->arity; j++)
-        if (btor_node_is_proxy (cur->e[j])) return false;
+        if (btor_node_is_proxy (cur->e[j]))
+        {
+          BTORLOG (1,
+                   "found proxy node in unique table: %s (parent: %s)",
+                   btor_util_node2string (cur->e[j]),
+                   btor_util_node2string (cur));
+          return false;
+        }
   return true;
 }
 
@@ -81,8 +89,6 @@ btor_dbg_check_hash_table_proxy_free (BtorPtrHashTable *table)
 bool
 btor_dbg_check_all_hash_tables_proxy_free (const Btor *btor)
 {
-  if (!btor_dbg_check_hash_table_proxy_free (btor->varsubst_constraints))
-    return false;
   if (!btor_dbg_check_hash_table_proxy_free (btor->embedded_constraints))
     return false;
   if (!btor_dbg_check_hash_table_proxy_free (btor->unsynthesized_constraints))
@@ -98,16 +104,34 @@ btor_dbg_check_hash_table_simp_free (BtorPtrHashTable *table)
   BtorPtrHashTableIterator it;
   btor_iter_hashptr_init (&it, table);
   while (btor_iter_hashptr_has_next (&it))
-    if (btor_node_real_addr (btor_iter_hashptr_next (&it))->simplified)
+    if (btor_node_is_simplified (btor_iter_hashptr_next (&it)))
       return false;
+  return true;
+}
+
+bool
+btor_dbg_check_unique_table_rebuild (const Btor *btor)
+{
+  uint32_t i;
+  BtorNode *cur;
+
+  for (i = 0; i < btor->nodes_unique_table.size; i++)
+    for (cur = btor->nodes_unique_table.chains[i]; cur; cur = cur->next)
+    {
+      if (cur->rebuild)
+      {
+        BTORLOG (1,
+                 "found node with rebuild flag enabled: %s",
+                 btor_util_node2string (cur));
+        return false;
+      }
+    }
   return true;
 }
 
 bool
 btor_dbg_check_all_hash_tables_simp_free (const Btor *btor)
 {
-  if (!btor_dbg_check_hash_table_simp_free (btor->varsubst_constraints))
-    return false;
   if (!btor_dbg_check_hash_table_simp_free (btor->embedded_constraints))
     return false;
   if (!btor_dbg_check_hash_table_simp_free (btor->unsynthesized_constraints))
@@ -147,8 +171,95 @@ btor_dbg_check_assumptions_simp_free (const Btor *btor)
   BtorPtrHashTableIterator it;
   btor_iter_hashptr_init (&it, btor->assumptions);
   while (btor_iter_hashptr_has_next (&it))
-    if (btor_node_real_addr (btor_iter_hashptr_next (&it))->simplified)
+    if (btor_node_is_simplified (btor_iter_hashptr_next (&it)))
       return false;
+  return true;
+}
+
+bool
+btor_dbg_check_nodes_simp_free (Btor *btor, BtorNode *nodes[], size_t nnodes)
+{
+  size_t i;
+  int32_t id;
+  BtorNode *cur;
+  BtorPtrHashTableIterator it;
+  BtorIntHashTable *cache;
+  BtorPtrHashTable *rho;
+  BtorNodePtrStack visit;
+  bool opt_nondestr_subst;
+
+  BTOR_INIT_STACK (btor->mm, visit);
+  cache              = btor_hashint_table_new (btor->mm);
+  opt_nondestr_subst = btor_opt_get (btor, BTOR_OPT_NONDESTR_SUBST) == 1;
+
+  for (i = 0; i < nnodes; i++)
+  {
+    BTOR_PUSH_STACK (visit, nodes[i]);
+    BTORLOG (3, "  root: %s", btor_util_node2string (nodes[i]));
+  }
+
+  while (!BTOR_EMPTY_STACK (visit))
+  {
+    cur = btor_node_real_addr (BTOR_POP_STACK (visit));
+    id  = btor_node_get_id (cur);
+    BTORLOG (3, "check simp free: %s", btor_util_node2string (cur));
+    if (opt_nondestr_subst && btor_node_is_synth (cur))
+    {
+      continue;
+    }
+    if (btor_node_is_simplified (cur))
+    {
+      BTORLOG (3,
+               "  simplified: %s",
+               btor_util_node2string (btor_node_get_simplified (btor, cur)));
+    }
+    assert (!btor_node_is_simplified (cur));
+
+    if (btor_hashint_table_contains (cache, id)) continue;
+
+    if (btor_node_is_lambda (cur)
+        && (rho = btor_node_lambda_get_static_rho (cur)))
+    {
+      btor_iter_hashptr_init (&it, rho);
+      while (btor_iter_hashptr_has_next (&it))
+      {
+        BTOR_PUSH_STACK (visit, it.bucket->data.as_ptr);
+        BTOR_PUSH_STACK (visit, btor_iter_hashptr_next (&it));
+      }
+    }
+
+    btor_hashint_table_add (cache, id);
+    for (i = 0; i < cur->arity; i++)
+    {
+      BTOR_PUSH_STACK (visit, cur->e[i]);
+    }
+  }
+
+  BTOR_RELEASE_STACK (visit);
+  btor_hashint_table_delete (cache);
+  return true;
+}
+
+bool
+btor_dbg_check_constraints_simp_free (Btor *btor)
+{
+  BtorNode *cur;
+  BtorNodePtrStack nodes;
+  BtorPtrHashTableIterator it;
+
+  BTOR_INIT_STACK (btor->mm, nodes);
+
+  btor_iter_hashptr_init (&it, btor->unsynthesized_constraints);
+  btor_iter_hashptr_queue (&it, btor->synthesized_constraints);
+  btor_iter_hashptr_queue (&it, btor->assumptions);
+  while (btor_iter_hashptr_has_next (&it))
+  {
+    cur = btor_iter_hashptr_next (&it);
+    BTOR_PUSH_STACK (nodes, cur);
+  }
+
+  btor_dbg_check_nodes_simp_free (btor, nodes.start, BTOR_COUNT_STACK (nodes));
+  BTOR_RELEASE_STACK (nodes);
   return true;
 }
 
@@ -164,7 +275,7 @@ btor_dbg_precond_slice_exp (Btor *btor,
 {
   assert (btor);
   assert (exp);
-  assert (!btor_node_real_addr (exp)->simplified);
+  assert (!btor_node_is_simplified (exp));
   assert (!btor_node_is_fun (exp));
   assert (upper >= lower);
   assert (upper < btor_node_bv_get_width (btor, exp));
@@ -184,7 +295,7 @@ btor_dbg_precond_regular_unary_bv_exp (Btor *btor, const BtorNode *exp)
 {
   assert (btor);
   assert (exp);
-  assert (!btor_node_real_addr (exp)->simplified);
+  assert (!btor_node_is_simplified (exp));
   assert (!btor_node_is_fun (exp));
   assert (btor_node_real_addr (exp)->btor == btor);
   return true;
@@ -206,8 +317,8 @@ btor_dbg_precond_eq_exp (Btor *btor, const BtorNode *e0, const BtorNode *e1)
   assert (real_e1);
   assert (real_e0->btor == btor);
   assert (real_e1->btor == btor);
-  assert (!real_e0->simplified);
-  assert (!real_e1->simplified);
+  assert (!btor_node_is_simplified (real_e0));
+  assert (!btor_node_is_simplified (real_e1));
   assert (btor_node_get_sort_id (real_e0) == btor_node_get_sort_id (real_e1));
   assert (real_e0->is_array == real_e1->is_array);
   assert (!btor_node_is_fun (real_e0)
@@ -221,8 +332,8 @@ btor_dbg_precond_concat_exp (Btor *btor, const BtorNode *e0, const BtorNode *e1)
   assert (btor);
   assert (e0);
   assert (e1);
-  assert (!btor_node_real_addr (e0)->simplified);
-  assert (!btor_node_real_addr (e1)->simplified);
+  assert (!btor_node_is_simplified (e0));
+  assert (!btor_node_is_simplified (e1));
   assert (!btor_node_is_fun (e0));
   assert (!btor_node_is_fun (e1));
   assert (btor_node_bv_get_width (btor, e0)
@@ -238,13 +349,11 @@ btor_dbg_precond_shift_exp (Btor *btor, const BtorNode *e0, const BtorNode *e1)
   assert (btor);
   assert (e0);
   assert (e1);
-  assert (!btor_node_real_addr (e0)->simplified);
-  assert (!btor_node_real_addr (e1)->simplified);
+  assert (!btor_node_is_simplified (e0));
+  assert (!btor_node_is_simplified (e1));
   assert (!btor_node_is_fun (e0));
   assert (!btor_node_is_fun (e1));
-  assert (btor_node_bv_get_width (btor, e0) > 1);
-  assert (btor_util_is_power_of_2 (btor_node_bv_get_width (btor, e0)));
-  assert (btor_util_log_2 (btor_node_bv_get_width (btor, e0))
+  assert (btor_node_bv_get_width (btor, e0)
           == btor_node_bv_get_width (btor, e1));
   assert (btor_node_real_addr (e0)->btor == btor);
   assert (btor_node_real_addr (e1)->btor == btor);
@@ -259,8 +368,8 @@ btor_dbg_precond_regular_binary_bv_exp (Btor *btor,
   assert (btor);
   assert (e0);
   assert (e1);
-  assert (!btor_node_real_addr (e0)->simplified);
-  assert (!btor_node_real_addr (e1)->simplified);
+  assert (!btor_node_is_simplified (e0));
+  assert (!btor_node_is_simplified (e1));
   assert (!btor_node_is_fun (e0));
   assert (!btor_node_is_fun (e1));
   assert (btor_node_get_sort_id (e0) == btor_node_get_sort_id (e1));
@@ -279,8 +388,8 @@ btor_dbg_precond_read_exp (Btor *btor,
   assert (e_index);
   assert (btor_node_is_regular (e_array));
   assert (btor_node_is_fun (e_array));
-  assert (!e_array->simplified);
-  assert (!btor_node_real_addr (e_index)->simplified);
+  assert (!btor_node_is_simplified (e_array));
+  assert (!btor_node_is_simplified (e_index));
   assert (!btor_node_is_fun (e_index));
   assert (btor_sort_array_get_index (btor, btor_node_get_sort_id (e_array))
           == btor_node_get_sort_id (e_index));
@@ -302,9 +411,9 @@ btor_dbg_precond_write_exp (Btor *btor,
   assert (e_value);
   assert (btor_node_is_regular (e_array));
   assert (btor_node_is_fun (e_array));
-  assert (!e_array->simplified);
-  assert (!btor_node_real_addr (e_index)->simplified);
-  assert (!btor_node_real_addr (e_value)->simplified);
+  assert (!btor_node_is_simplified (e_array));
+  assert (!btor_node_is_simplified (e_index));
+  assert (!btor_node_is_simplified (e_value));
   assert (!btor_node_is_fun (e_index));
   assert (!btor_node_is_fun (e_value));
   assert (btor_sort_array_get_index (btor, btor_node_get_sort_id (e_array))
@@ -328,7 +437,7 @@ btor_dbg_precond_cond_exp (Btor *btor,
   assert (e_cond);
   assert (e_if);
   assert (e_else);
-  assert (!btor_node_real_addr (e_cond)->simplified);
+  assert (!btor_node_is_simplified (e_cond));
   assert (btor_node_bv_get_width (btor, e_cond) == 1);
 
   BtorNode *real_e_if, *real_e_else;
@@ -336,8 +445,8 @@ btor_dbg_precond_cond_exp (Btor *btor,
   real_e_if   = btor_node_real_addr (e_if);
   real_e_else = btor_node_real_addr (e_else);
 
-  assert (!real_e_if->simplified);
-  assert (!real_e_else->simplified);
+  assert (!btor_node_is_simplified (real_e_if));
+  assert (!btor_node_is_simplified (real_e_else));
   assert (btor_node_get_sort_id (real_e_if)
           == btor_node_get_sort_id (real_e_else));
   assert (btor_node_real_addr (e_cond)->btor == btor);

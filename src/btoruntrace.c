@@ -2,7 +2,7 @@
  *
  *  Copyright (C) 2013 Christian Reisenberger.
  *  Copyright (C) 2013-2019 Aina Niemetz.
- *  Copyright (C) 2013-2018 Mathias Preiner.
+ *  Copyright (C) 2013-2020 Mathias Preiner.
  *
  *  This file is part of Boolector.
  *  See COPYING for more information on using this software.
@@ -10,11 +10,13 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 #include "boolector.h"
 #include "btoropt.h"
 #include "utils/btorhash.h"
@@ -36,7 +38,7 @@
   "\n"                                                                     \
   "  -v, --verbosity              increase verbosity\n"                    \
   "  -e, --exit-on-abort        exit on boolector abort\n"                 \
-  "  -s, --skip-getters         skip 'getter' functions\n"                 \
+  "  -s, --skip                 skip checks for return values\n"           \
   "  -i, --ignore-sat-result    do not exit on mismatching sat result\n"   \
   "  -b <btoropt> <val>         set boolector option <btoropt> to <val>\n" \
   "                             (Note: overrides trace opt settings!)\n"   \
@@ -50,6 +52,7 @@ void boolector_chkclone (Btor *);
 void boolector_set_btor_id (Btor *, BoolectorNode *, int32_t);
 void boolector_get_btor_msg (Btor *);
 void boolector_print_value_smt2 (Btor *, BoolectorNode *, char *, FILE *);
+void boolector_var_mark_bool (Btor *, BoolectorNode *);
 
 /*------------------------------------------------------------------------*/
 typedef struct BtorUNT BtorUNT;
@@ -97,7 +100,17 @@ btorunt_new (void)
   res->mm = mm;
   BTOR_INIT_STACK (mm, res->cl_btor_opts);
   res->btor_opts = btor_hashptr_table_new (mm, btor_hash_str, btor_compare_str);
-  tmpbtor        = boolector_new ();
+
+  /* add end of options marker */
+  BTOR_NEW (res->mm, opt);
+  opt->kind = BTOR_OPT_NUM_OPTS;
+  opt->name = btor_mem_strdup (res->mm, BTOR_OPT_NUM_OPTS_STR);
+  opt->val  = 0;
+  btor_hashptr_table_add (res->btor_opts, BTOR_OPT_NUM_OPTS_STR)->data.as_ptr =
+      opt;
+
+  /* add boolector options */
+  tmpbtor = boolector_new ();
   for (o = boolector_first_opt (tmpbtor), lng = 0;
        boolector_has_opt (tmpbtor, o);
        o = boolector_next_opt (tmpbtor, o))
@@ -219,8 +232,7 @@ btorunt_get_btor_opt (BtorUNT *unt, const char *opt)
   assert (opt);
   BtorPtrHashBucket *b;
   b = btor_hashptr_table_get (unt->btor_opts, (void *) opt);
-  if (!b) btorunt_error ("Invalid Boolector option %s", opt);
-  return b->data.as_ptr;
+  return !b ? NULL : b->data.as_ptr;
 }
 
 static bool
@@ -268,7 +280,7 @@ parse_int_arg (char *op)
   return atoi (tok);
 }
 
-static int32_t
+static uint32_t
 parse_uint_arg (char *op)
 {
   const char *tok;
@@ -277,7 +289,7 @@ parse_uint_arg (char *op)
     btorunt_parse_error ("expected unsigned integer argument for '%s'", op);
   }
   assert (tok);
-  return atoi (tok);
+  return strtoul (tok, 0, 10);
 }
 
 static char *
@@ -289,6 +301,50 @@ parse_str_arg (char *op)
     btorunt_parse_error ("expected string argument for '%s'", op);
   }
   return tok;
+}
+
+/* Parse
+ *   <enum> <long-opt> <value>
+ * or
+ *   <long-opt> <value>
+ */
+static BtorOption
+parse_opt (char **arg_str)
+{
+  BtorUNTBtorOpt *unt_opt;
+  BtorOption opt = BTOR_OPT_NUM_OPTS;
+  char *tok;
+
+  if (!(tok = strtok (0, " ")))
+  {
+    btorunt_parse_error ("expected long option name");
+  }
+
+  if (is_num_str (tok) && tok[0] != '-')
+  {
+    opt = strtoul (tok, 0, 10);
+    tok = strtok (0, " ");
+  }
+
+  unt_opt = btorunt_get_btor_opt (g_btorunt, tok);
+  if (!unt_opt)
+    btorunt_parse_error ("unknown option '%s'", tok);
+
+  if (arg_str) *arg_str = tok;
+  if (opt == BTOR_OPT_NUM_OPTS)
+  {
+    opt = unt_opt->kind;
+  }
+  else if (opt != unt_opt->kind)
+  {
+    btorunt_parse_error (
+        "expected enum value '%u' for long option '%s', got '%u'",
+        unt_opt->kind,
+        tok,
+        opt);
+  }
+
+  return opt;
 }
 
 #define PARSE_ARGS0(op) parse_check_last_arg (op);
@@ -367,18 +423,37 @@ hmap_clear (BtorPtrHashTable *hmap)
 
 /*------------------------------------------------------------------------*/
 
-#define RET_NONE 0
-#define RET_VOIDPTR 1
-#define RET_INT 2
-#define RET_UINT 3
-#define RET_CHARPTR 4
-#define RET_ARRASS 5
-#define RET_BOOL 6
-#define RET_SKIP -1
+enum
+{
+  RET_NONE,
+  RET_VOIDPTR,
+  RET_NODEPTR,
+  RET_SORTPTR,
+  RET_INT,
+  RET_UINT,
+  RET_CHARPTR,
+  RET_ARRASS,
+  RET_BOOL,
+  RET_SKIP
+};
 
 BTOR_DECLARE_STACK (BoolectorSort, BoolectorSort);
 
 #define BTOR_STR_LEN 40
+
+static bool
+check_return_str (char *expected, char *got)
+{
+  size_t pos1 = 0, pos2 = 0;
+  for (; pos1 < strlen (expected) && expected[pos1] != '@'; pos1++)
+    ;
+  for (; pos2 < strlen (got) && got[pos2] != '@'; pos2++)
+    ;
+
+  if (pos1 != pos2) return false;
+
+  return strncmp (expected, got, pos1) == 0;
+}
 
 void
 parse (FILE *file)
@@ -404,8 +479,9 @@ parse (FILE *file)
   char *btor_str; /* btor pointer string */
   char *exp_str;  /* expression string (pointer) */
   int32_t arg1_int, arg2_int, arg3_int;
-  uint32_t arg3_uint;
+  uint32_t arg1_uint, arg2_uint, arg3_uint;
   char *arg1_str, *arg2_str, *arg3_str;
+  char check_buf[128];
   BtorIntStack arg_int;
   BtorCharPtrStack arg_str;
   BoolectorSortStack sort_stack;
@@ -476,10 +552,48 @@ NEXT:
         parse_check_last_arg ("return");
         hmap_add (hmap, exp_str, ret_ptr);
       }
+      else if (exp_ret == RET_NODEPTR)
+      {
+        exp_str = parse_str_arg ("return");
+        parse_check_last_arg ("return");
+        if (!g_btorunt->skip)
+        {
+          bool is_inv = ((uintptr_t) 1 & (uintptr_t) ret_ptr) != 0;
+          int32_t id  = boolector_get_node_id (btor, ret_ptr);
+          snprintf (check_buf, 128, "n%d@%p", is_inv ? -id : id, btor);
+          if (!check_return_str (exp_str, check_buf))
+          {
+            btorunt_error (
+                "Boolector under test changed. "
+                "expected node %s but got %s",
+                exp_str,
+                check_buf);
+          }
+        }
+        hmap_add (hmap, exp_str, ret_ptr);
+      }
+      else if (exp_ret == RET_SORTPTR)
+      {
+        exp_str = parse_str_arg ("return");
+        parse_check_last_arg ("return");
+        if (!g_btorunt->skip)
+        {
+          snprintf (check_buf, 128, "s%" PRId64 "@%p", (int64_t) ret_ptr, btor);
+          if (!check_return_str (exp_str, check_buf))
+          {
+            btorunt_error (
+                "Boolector under test changed. "
+                "expected node %s but got %s",
+                exp_str,
+                check_buf);
+          }
+        }
+        hmap_add (hmap, exp_str, ret_ptr);
+      }
       else if (exp_ret == RET_BOOL)
       {
         bool exp_bool = parse_bool_arg ("return");
-        if (exp_bool != ret_bool)
+        if (exp_bool != ret_bool && !g_btorunt->skip)
           btorunt_error ("expected return value %s but got %s",
                          exp_bool ? "true" : "false",
                          ret_bool ? "true" : "false");
@@ -488,7 +602,7 @@ NEXT:
       {
         int32_t exp_int = parse_int_arg ("return");
         parse_check_last_arg ("return");
-        if (exp_int != ret_int)
+        if (exp_int != ret_int && !g_btorunt->skip)
           btorunt_error (
               "expected return value %d but got %d", exp_int, ret_int);
       }
@@ -496,7 +610,7 @@ NEXT:
       {
         uint32_t exp_uint = parse_uint_arg ("return");
         parse_check_last_arg ("return");
-        if (exp_uint != ret_uint)
+        if (exp_uint != ret_uint && !g_btorunt->skip)
           btorunt_error (
               "expected return value %d but got %d", exp_uint, ret_uint);
       }
@@ -504,7 +618,7 @@ NEXT:
       {
         exp_str = parse_str_arg ("return");
         parse_check_last_arg ("return");
-        if (strcmp (exp_str, ret_str))
+        if (strcmp (exp_str, ret_str) && !g_btorunt->skip)
           btorunt_error (
               "expected return string %s but got %s", exp_str, ret_str);
       }
@@ -516,7 +630,7 @@ NEXT:
           hmap_add (hmap, arg1_str, res1_pptr);
           hmap_add (hmap, arg2_str, res2_pptr);
         }
-        if (arg3_int != ret_int)
+        if (arg3_int != ret_int && !g_btorunt->skip)
           btorunt_error (
               "expected return value %d but got %d", arg3_int, ret_int);
       }
@@ -571,19 +685,19 @@ NEXT:
     {
       PARSE_ARGS1 (tok, int);
       ret_ptr = boolector_match_node_by_id (btor, arg1_int);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "match_node_by_symbol"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_match_node_by_symbol (btor, arg1_str);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "match_node"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_match_node (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "delete"))
     {
@@ -672,9 +786,9 @@ NEXT:
     }
     else if (!strcmp (tok, "set_opt"))
     {
-      PARSE_ARGS2 (tok, str, int);
-      opt = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
-      val = arg2_int;
+      opt = parse_opt (&arg1_str);
+      val = parse_uint_arg (tok);
+      parse_check_last_arg (tok);
       if (!btorunt_has_cl_btor_opt (g_btorunt, opt))
       {
         boolector_set_opt (btor, opt, val);
@@ -687,97 +801,113 @@ NEXT:
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
-        ret_int = boolector_get_opt (btor, opt);
-        exp_ret = RET_INT;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
+        ret_uint = boolector_get_opt (btor, opt);
+        exp_ret  = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_min"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
-        ret_int = boolector_get_opt_min (btor, opt);
-        exp_ret = RET_INT;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
+        ret_uint = boolector_get_opt_min (btor, opt);
+        exp_ret  = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_max"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
-        ret_int = boolector_get_opt_max (btor, opt);
-        exp_ret = RET_INT;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
+        ret_uint = boolector_get_opt_max (btor, opt);
+        exp_ret  = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_dflt"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
-        ret_int = boolector_get_opt_dflt (btor, opt);
-        exp_ret = RET_INT;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
+        ret_uint = boolector_get_opt_dflt (btor, opt);
+        exp_ret  = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_shrt"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
         ret_str = (void *) boolector_get_opt_shrt (btor, opt);
-        exp_ret = RET_CHARPTR;
+        exp_ret = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_lng"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
         ret_str = (void *) boolector_get_opt_lng (btor, opt);
         exp_ret = RET_CHARPTR;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_opt_desc"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
         ret_str = (void *) boolector_get_opt_desc (btor, opt);
         exp_ret = RET_CHARPTR;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "has_opt"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
         ret_bool = boolector_has_opt (btor, opt);
-        exp_ret = RET_BOOL;
+        exp_ret  = RET_BOOL;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "first_opt"))
     {
@@ -788,25 +918,29 @@ NEXT:
         exp_ret = RET_INT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "next_opt"))
     {
       if (!g_btorunt->skip)
       {
-        PARSE_ARGS1 (tok, str);
-        opt     = btorunt_get_btor_opt (g_btorunt, arg1_str)->kind;
+        opt = parse_opt (0);
+        parse_check_last_arg (tok);
         ret_int = boolector_next_opt (btor, opt);
         exp_ret = RET_INT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "copy"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_copy (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "release"))
     {
@@ -880,340 +1014,346 @@ NEXT:
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_const (btor, arg1_str);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "constd"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_constd (btor, get_sort (hmap, arg1_str), arg2_str);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "zero"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_zero (btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "false"))
     {
       PARSE_ARGS0 (tok);
       ret_ptr = boolector_false (btor);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ones"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_ones (btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "true"))
     {
       PARSE_ARGS0 (tok);
       ret_ptr = boolector_true (btor);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "one"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_one (btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "min_signed"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_min_signed (btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "max_signed"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_max_signed (btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "unsigned_int"))
     {
-      PARSE_ARGS2 (tok, int, str);
+      PARSE_ARGS2 (tok, uint, str);
       ret_ptr =
-          boolector_unsigned_int (btor, arg1_int, get_sort (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+          boolector_unsigned_int (btor, arg1_uint, get_sort (hmap, arg2_str));
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "int"))
     {
       PARSE_ARGS2 (tok, int, str);
       ret_ptr = boolector_int (btor, arg1_int, get_sort (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "var"))
     {
       PARSE_ARGS2 (tok, str, str);
       arg2_str = !strcmp (arg2_str, "(null)") ? 0 : arg2_str;
       ret_ptr  = boolector_var (btor, get_sort (hmap, arg1_str), arg2_str);
-      exp_ret  = RET_VOIDPTR;
+      exp_ret  = RET_NODEPTR;
     }
     else if (!strcmp (tok, "array"))
     {
       PARSE_ARGS2 (tok, str, str);
       arg2_str = !strcmp (arg2_str, "(null)") ? 0 : arg2_str;
       ret_ptr  = boolector_array (btor, get_sort (hmap, arg1_str), arg2_str);
-      exp_ret  = RET_VOIDPTR;
+      exp_ret  = RET_NODEPTR;
     }
     else if (!strcmp (tok, "const_array"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_const_array (
           btor, get_sort (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "uf"))
     {
       PARSE_ARGS2 (tok, str, str);
       arg2_str = !strcmp (arg2_str, "(null)") ? 0 : arg2_str;
       ret_ptr  = boolector_uf (btor, get_sort (hmap, arg1_str), arg2_str);
-      exp_ret  = RET_VOIDPTR;
+      exp_ret  = RET_NODEPTR;
     }
     else if (!strcmp (tok, "not"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_not (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "neg"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_neg (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "redor"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_redor (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "redxor"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_redxor (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "redand"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_redand (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "slice"))
     {
-      PARSE_ARGS3 (tok, str, int, int);
-      ret_ptr =
-          boolector_slice (btor, hmap_get (hmap, arg1_str), arg2_int, arg3_int);
-      exp_ret = RET_VOIDPTR;
+      PARSE_ARGS3 (tok, str, uint, uint);
+      ret_ptr = boolector_slice (
+          btor, hmap_get (hmap, arg1_str), arg2_uint, arg3_uint);
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "uext"))
     {
-      PARSE_ARGS2 (tok, str, int);
-      ret_ptr = boolector_uext (btor, hmap_get (hmap, arg1_str), arg2_int);
-      exp_ret = RET_VOIDPTR;
+      PARSE_ARGS2 (tok, str, uint);
+      ret_ptr = boolector_uext (btor, hmap_get (hmap, arg1_str), arg2_uint);
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sext"))
     {
-      PARSE_ARGS2 (tok, str, int);
-      ret_ptr = boolector_sext (btor, hmap_get (hmap, arg1_str), arg2_int);
-      exp_ret = RET_VOIDPTR;
+      PARSE_ARGS2 (tok, str, uint);
+      ret_ptr = boolector_sext (btor, hmap_get (hmap, arg1_str), arg2_uint);
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "implies"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_implies (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "iff"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_iff (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "xor"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_xor (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "xnor"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_xnor (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "and"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_and (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "nand"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_nand (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "or"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_or (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "nor"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_nor (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "eq"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_eq (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ne"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ne (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "add"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_add (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "uaddo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_uaddo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "saddo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_saddo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "mul"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_mul (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "umulo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_umulo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "smulo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_smulo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ult"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ult (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "slt"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_slt (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ulte"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ulte (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "slte"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_slte (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ugt"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ugt (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sgt"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sgt (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ugte"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ugte (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sgte"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sgte (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sll"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sll (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "srl"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_srl (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sra"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sra (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "rol"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_rol (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
+      exp_ret = RET_NODEPTR;
+    }
+    else if (!strcmp (tok, "roli"))
+    {
+      PARSE_ARGS2 (tok, str, int);
+      ret_ptr = boolector_roli (btor, hmap_get (hmap, arg1_str), arg2_int);
       exp_ret = RET_VOIDPTR;
     }
     else if (!strcmp (tok, "ror"))
@@ -1221,6 +1361,12 @@ NEXT:
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ror (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
+      exp_ret = RET_NODEPTR;
+    }
+    else if (!strcmp (tok, "rori"))
+    {
+      PARSE_ARGS2 (tok, str, int);
+      ret_ptr = boolector_rori (btor, hmap_get (hmap, arg1_str), arg2_int);
       exp_ret = RET_VOIDPTR;
     }
     else if (!strcmp (tok, "sub"))
@@ -1228,83 +1374,83 @@ NEXT:
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sub (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "usubo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_usubo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "ssubo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_ssubo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "udiv"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_udiv (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sdiv"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sdiv (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "sdivo"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_sdivo (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "urem"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_urem (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "srem"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_srem (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "smod"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_smod (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "concat"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_concat (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "repeat"))
     {
-      PARSE_ARGS2 (tok, str, int);
-      ret_ptr = boolector_repeat (btor, hmap_get (hmap, arg1_str), arg2_int);
-      exp_ret = RET_VOIDPTR;
+      PARSE_ARGS2 (tok, str, uint);
+      ret_ptr = boolector_repeat (btor, hmap_get (hmap, arg1_str), arg2_uint);
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "read"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = boolector_read (
           btor, hmap_get (hmap, arg1_str), hmap_get (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "write"))
     {
@@ -1313,7 +1459,7 @@ NEXT:
                                  hmap_get (hmap, arg1_str),
                                  hmap_get (hmap, arg2_str),
                                  hmap_get (hmap, arg3_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "cond"))
     {
@@ -1322,18 +1468,18 @@ NEXT:
                                 hmap_get (hmap, arg1_str),
                                 hmap_get (hmap, arg2_str),
                                 hmap_get (hmap, arg3_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "param"))
     {
       PARSE_ARGS2 (tok, str, str);
       arg2_str = !strcmp (arg2_str, "(null)") ? 0 : arg2_str;
       ret_ptr  = boolector_param (btor, get_sort (hmap, arg1_str), arg2_str);
-      exp_ret  = RET_VOIDPTR;
+      exp_ret  = RET_NODEPTR;
     }
     else if (!strcmp (tok, "fun"))
     {
-      uint32_t arg1_uint = parse_uint_arg (tok); /* paramc */
+      arg1_uint = parse_uint_arg (tok);          /* paramc */
       BTOR_NEWN (g_btorunt->mm, tmp, arg1_uint); /* params */
       for (i = 0; i < arg1_uint; i++)
         tmp[i] = hmap_get (hmap, parse_str_arg (tok));
@@ -1341,11 +1487,11 @@ NEXT:
       parse_check_last_arg (tok);
       ret_ptr = boolector_fun (btor, tmp, arg1_uint, hmap_get (hmap, arg1_str));
       BTOR_DELETEN (g_btorunt->mm, tmp, arg1_uint);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "exists"))
     {
-      uint32_t arg1_uint = parse_uint_arg (tok);
+      arg1_uint = parse_uint_arg (tok);
       BTOR_NEWN (g_btorunt->mm, tmp, arg1_uint); /* vars */
       for (i = 0; i < arg1_uint; i++)
         tmp[i] = hmap_get (hmap, parse_str_arg (tok));
@@ -1354,11 +1500,11 @@ NEXT:
       ret_ptr =
           boolector_exists (btor, tmp, arg1_uint, hmap_get (hmap, arg1_str));
       BTOR_DELETEN (g_btorunt->mm, tmp, arg1_uint);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "forall"))
     {
-      uint32_t arg1_uint = parse_uint_arg (tok);
+      arg1_uint = parse_uint_arg (tok);
       BTOR_NEWN (g_btorunt->mm, tmp, arg1_uint); /* vars */
       for (i = 0; i < arg1_uint; i++)
         tmp[i] = hmap_get (hmap, parse_str_arg (tok));
@@ -1367,11 +1513,11 @@ NEXT:
       ret_ptr =
           boolector_forall (btor, tmp, arg1_uint, hmap_get (hmap, arg1_str));
       BTOR_DELETEN (g_btorunt->mm, tmp, arg1_uint);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "apply"))
     {
-      uint32_t arg1_uint = parse_uint_arg (tok); /* argc */
+      arg1_uint = parse_uint_arg (tok);          /* argc */
       BTOR_NEWN (g_btorunt->mm, tmp, arg1_uint); /* args */
       for (i = 0; i < arg1_uint; i++)
         tmp[i] = hmap_get (hmap, parse_str_arg (tok));
@@ -1380,19 +1526,19 @@ NEXT:
       ret_ptr =
           boolector_apply (btor, tmp, arg1_uint, hmap_get (hmap, arg1_str));
       BTOR_DELETEN (g_btorunt->mm, tmp, arg1_uint);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "inc"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_inc (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     else if (!strcmp (tok, "dec"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_dec (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_NODEPTR;
     }
     /* getter */
     else if (!strcmp (tok, "get_refs"))
@@ -1400,8 +1546,8 @@ NEXT:
       PARSE_ARGS0 (tok);
       if (!g_btorunt->skip)
       {
-        ret_int = boolector_get_refs (btor);
-        exp_ret = RET_INT;
+        ret_uint = boolector_get_refs (btor);
+        exp_ret  = RET_UINT;
       }
       else
         exp_ret = RET_SKIP;
@@ -1440,8 +1586,8 @@ NEXT:
       PARSE_ARGS1 (tok, str);
       if (!g_btorunt->skip)
       {
-        ret_int = boolector_get_width (btor, hmap_get (hmap, arg1_str));
-        exp_ret = RET_INT;
+        ret_uint = boolector_get_width (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_UINT;
       }
       else
         exp_ret = RET_SKIP;
@@ -1451,8 +1597,8 @@ NEXT:
       PARSE_ARGS1 (tok, str);
       if (!g_btorunt->skip)
       {
-        ret_int = boolector_get_index_width (btor, hmap_get (hmap, arg1_str));
-        exp_ret = RET_INT;
+        ret_uint = boolector_get_index_width (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_UINT;
       }
       else
         exp_ret = RET_SKIP;
@@ -1473,8 +1619,8 @@ NEXT:
       PARSE_ARGS1 (tok, str);
       if (!g_btorunt->skip)
       {
-        ret_int = boolector_get_fun_arity (btor, hmap_get (hmap, arg1_str));
-        exp_ret = RET_INT;
+        ret_uint = boolector_get_fun_arity (btor, hmap_get (hmap, arg1_str));
+        exp_ret  = RET_UINT;
       }
       else
         exp_ret = RET_SKIP;
@@ -1580,7 +1726,7 @@ NEXT:
     }
     else if (!strcmp (tok, "fun_sort_check"))
     {
-      uint32_t arg1_uint = parse_uint_arg (tok); /* argc */
+      arg1_uint = parse_uint_arg (tok); /* argc */
       BTOR_NEWN (g_btorunt->mm, tmp, arg1_uint);
       for (i = 0; i < arg1_uint; i++) /* args */
         tmp[i] = hmap_get (hmap, parse_str_arg (tok));
@@ -1644,32 +1790,37 @@ NEXT:
       boolector_print_value_smt2 (
           btor, hmap_get (hmap, arg1_str), arg2_str, stdout);
     }
+    else if (!strcmp (tok, "var_mark_bool"))
+    {
+      PARSE_ARGS1 (tok, str);
+      boolector_var_mark_bool (btor, hmap_get (hmap, arg1_str));
+    }
     /* sorts */
     else if (!strcmp (tok, "bool_sort"))
     {
       PARSE_ARGS0 (tok);
       ret_ptr = (void *) (size_t) boolector_bool_sort (btor);
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "bitvec_sort"))
     {
-      PARSE_ARGS1 (tok, int);
-      ret_ptr = (void *) (size_t) boolector_bitvec_sort (btor, arg1_int);
-      exp_ret = RET_VOIDPTR;
+      PARSE_ARGS1 (tok, uint);
+      ret_ptr = (void *) (size_t) boolector_bitvec_sort (btor, arg1_uint);
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "array_sort"))
     {
       PARSE_ARGS2 (tok, str, str);
       ret_ptr = (void *) (size_t) boolector_array_sort (
           btor, get_sort (hmap, arg1_str), get_sort (hmap, arg2_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "copy_sort"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = (void *) (size_t) boolector_copy_sort (
           btor, get_sort (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "fun_sort"))
     {
@@ -1681,7 +1832,7 @@ NEXT:
           sort_stack.start,
           BTOR_COUNT_STACK (sort_stack) - 1,
           BTOR_TOP_STACK (sort_stack));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "release_sort"))
     {
@@ -1710,7 +1861,9 @@ NEXT:
         exp_ret  = RET_BOOL;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "is_bitvec_sort"))
     {
@@ -1721,38 +1874,42 @@ NEXT:
         exp_ret  = RET_BOOL;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "bitvec_sort_get_width"))
     {
       PARSE_ARGS1 (tok, str);
       if (!g_btorunt->skip)
       {
-        ret_int =
+        ret_uint =
             boolector_bitvec_sort_get_width (btor, get_sort (hmap, arg1_str));
-        exp_ret = RET_INT;
+        exp_ret = RET_UINT;
       }
       else
+      {
         exp_ret = RET_SKIP;
+      }
     }
     else if (!strcmp (tok, "get_sort"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_get_sort (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "fun_get_domain_sort"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr = boolector_fun_get_domain_sort (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     else if (!strcmp (tok, "fun_get_codomain_sort"))
     {
       PARSE_ARGS1 (tok, str);
       ret_ptr =
           boolector_fun_get_codomain_sort (btor, hmap_get (hmap, arg1_str));
-      exp_ret = RET_VOIDPTR;
+      exp_ret = RET_SORTPTR;
     }
     /* dumping */
     else if (!strcmp (tok, "dump_btor_node"))
@@ -1806,9 +1963,11 @@ NEXT:
         outfile = fopen (outfilename, "r");
         tmpbtor = boolector_new ();
         boolector_set_opt (tmpbtor, BTOR_OPT_PARSE_INTERACTIVE, 0);
+        bool parsed_smt2;
         pres = boolector_parse (
-            tmpbtor, outfile, outfilename, stdout, &emsg, &pstat);
+            tmpbtor, outfile, outfilename, stdout, &emsg, &pstat, &parsed_smt2);
         (void) pres;
+        (void) parsed_smt2;
         if (emsg)
           fprintf (stderr, "error while parsing dumped file: %s\n", emsg);
         assert (pres != BOOLECTOR_PARSE_ERROR);
@@ -1830,7 +1989,9 @@ NEXT:
       boolector_dump_aiger_binary (btor, stdout, arg1_int);
     }
     else
+    {
       btorunt_parse_error ("invalid command '%s'", tok);
+    }
   }
   g_btorunt->line++;
   len = 0;
@@ -1881,7 +2042,7 @@ main (int32_t argc, char **argv)
       g_btorunt->verbosity = 1;
     else if (!strcmp (argv[i], "-e") || !strcmp (argv[i], "--exit-on-abort"))
       g_btorunt->exit_on_abort = true;
-    else if (!strcmp (argv[i], "-s") || !strcmp (argv[i], "--skip-getters"))
+    else if (!strcmp (argv[i], "-s") || !strcmp (argv[i], "--skip"))
       g_btorunt->skip = true;
     else if (!strcmp (argv[i], "-i")
              || !strcmp (argv[i], "--ignore-sat-result"))
